@@ -1,0 +1,11 @@
+obj/
+out/
+_stage/
+_release/
+*.log
+*.exe
+*.obj
+*.lib
+*.exp
+*.pdb
+*.bmp
