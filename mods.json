@@ -1,0 +1,71 @@
+{
+  "schema": 1,
+  "repo": "don-pardon42/edf6-mods",
+  "modloader": {
+    "name": "EDFModLoader",
+    "page": "https://github.com/BlueAmulet/EDFModLoader/releases"
+  },
+  "mods": [
+    {
+      "id": "EDFStats",
+      "version": "0.9",
+      "description": "Статистика игроков в кооперативе: урон, DPS, убийства, урон по своим, поднятия. Окно в игре (F6/F7) и HTML-отчёт после миссии.",
+      "log": "EDFStats.log",
+      "report": "EDFStats\\latest.html",
+      "files": [
+        {
+          "name": "EDFStats.dll",
+          "kind": "dll",
+          "url": "https://github.com/don-pardon42/edf6-mods/releases/download/edfstats-v0.9/EDFStats.dll",
+          "sha256": "aaa5c92a1d2f26a407217b83f861b5b5a7559dc47d2d1d89c318cf345d37e117"
+        },
+        {
+          "name": "EDFStats.ini",
+          "kind": "ini",
+          "url": "https://github.com/don-pardon42/edf6-mods/releases/download/edfstats-v0.9/EDFStats.ini",
+          "sha256": "b99565320831cc4cf8d3a26dd41af42caeb03d302d285e14bb47af8268f4a17d"
+        }
+      ]
+    },
+    {
+      "id": "SpectateCam",
+      "version": "0.4",
+      "description": "После смерти камера следит за живыми союзниками: = / - игроки, 9 NPC, 0 к себе.",
+      "log": "SpectateCam.log",
+      "files": [
+        {
+          "name": "SpectateCam.dll",
+          "kind": "dll",
+          "url": "https://github.com/don-pardon42/edf6-mods/releases/download/spectatecam-v0.4/SpectateCam.dll",
+          "sha256": "e5c956d42d0ebc267de2580e6abef6f451032b873d0f4cf27d96ab78b94ef26e"
+        },
+        {
+          "name": "SpectateCam.ini",
+          "kind": "ini",
+          "url": "https://github.com/don-pardon42/edf6-mods/releases/download/spectatecam-v0.4/SpectateCam.ini",
+          "sha256": "bef281a2ccefd3a3b65ed56af667fd4cc84078cb0436c55067a58e25a02e8f39"
+        }
+      ]
+    },
+    {
+      "id": "SquadSync",
+      "version": "0.1",
+      "description": "Подтягивает персонажей других игроков к их настоящей позиции, когда сетевая синхронизация отстаёт. Нужны IP игроков в настройках.",
+      "log": "SquadSync.log",
+      "files": [
+        {
+          "name": "SquadSync.dll",
+          "kind": "dll",
+          "url": "https://github.com/don-pardon42/edf6-mods/releases/download/squadsync-v0.1/SquadSync.dll",
+          "sha256": "67665723660fc42f1058803154702a276cc500cfdd63361beae6c93953509c4c"
+        },
+        {
+          "name": "SquadSync.ini",
+          "kind": "ini",
+          "url": "https://github.com/don-pardon42/edf6-mods/releases/download/squadsync-v0.1/SquadSync.ini",
+          "sha256": "4f2877486612874a1f636ef0936b1bf1706a0a41d72ed290b700e8230115bc49"
+        }
+      ]
+    }
+  ]
+}
