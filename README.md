@@ -12,7 +12,9 @@
 
 ## Лаунчер
 
-[EDF6 Launcher](Launcher/) — выбор, установка и обновление модов, настройки и запуск игры (черновик).
+[EDF6 Launcher](Launcher/) — выбор, установка и обновление модов, настройки и запуск игры.
+
+**Скачать:** [EDF6Launcher.exe](https://github.com/don-pardon42/edf6-mods/releases/download/launcher-v0.3.1/EDF6Launcher.exe) (или [архив с инструкцией](https://github.com/don-pardon42/edf6-mods/releases/download/launcher-v0.3.1/EDF6Launcher-0.3.1.zip)). Собирать ничего не нужно: положите exe в папку игры рядом с `EDF6.exe` и запустите. Нужен установленный EDFModLoader.
 
 ## Установка вручную
 
