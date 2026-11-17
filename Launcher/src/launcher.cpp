@@ -48,7 +48,7 @@ static void PickLanguage(const std::string &setting) {
     g_en = !(p == LANG_RUSSIAN || p == LANG_UKRAINIAN || p == LANG_BELARUSIAN || p == LANG_KAZAK);
 }
 
-static const char *LAUNCHER_VERSION = "0.3";
+static const char *LAUNCHER_VERSION = "0.3.1";
 static const char *DEFAULT_MANIFEST = "https://raw.githubusercontent.com/don-pardon42/edf6-mods/main/mods.json";
 
 // ---- small helpers ------------------------------------------------------------------------------
@@ -400,14 +400,19 @@ static bool RemoveMod(Mod &m, std::string &msg) {             // caller holds g_
     return true;
 }
 static bool ModLoaderOk() { return Exists(g_gameDir + "\\winmm.dll") && Exists(g_gameDir + "\\EDFModLoader.dll"); }
+// called from the UI while g_mx is held: set g_status directly (Status() would lock g_mx again and
+// std::mutex throws on a second lock from the same thread - the launcher crashed with 0xC0000409 on Play)
 static void Play() {
     std::string exe = g_gameExe.find(':') != std::string::npos ? g_gameExe : g_gameDir + "\\" + g_gameExe;
     std::wstring cmd = L"\"" + W(exe) + L"\" " + W(g_gameArgs);
     STARTUPINFOW si{ sizeof si }; PROCESS_INFORMATION pi{};
     if (CreateProcessW(nullptr, &cmd[0], nullptr, nullptr, FALSE, 0, nullptr, W(g_gameDir).c_str(), &si, &pi)) {
-        CloseHandle(pi.hThread); CloseHandle(pi.hProcess); Status(L_(u8"Игра запущена", u8"Game started"));
+        CloseHandle(pi.hThread); CloseHandle(pi.hProcess); g_status = L_(u8"Игра запущена", u8"Game started");
         if (g_closeOnPlay) PostQuitMessage(0);
-    } else Status(L_(u8"Не удалось запустить ", u8"Cannot start ") + exe + " (" + std::to_string(GetLastError()) + ")");
+    } else {
+        DWORD err = GetLastError();
+        g_status = L_(u8"Не удалось запустить ", u8"Cannot start ") + exe + " (" + std::to_string(err) + ")";
+    }
 }
 
 // ---- launcher settings (EDF6Launcher.ini next to the exe) -------------------------------------------------
@@ -939,17 +944,24 @@ static void SaveBmp(const std::string &path) {
 
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     int argc; wchar_t **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    std::string shot; bool selftest = false;
+    std::string shot, playExe; bool selftest = false;
     for (int i = 1; i < argc; ++i) {
         std::wstring a = argv[i];
         if (a == L"--game-dir" && i + 1 < argc) g_gameDir = U(argv[++i]);
         else if (a == L"--manifest" && i + 1 < argc) g_manifestSrc = U(argv[++i]);
         else if (a == L"--screenshot" && i + 1 < argc) shot = U(argv[++i]);
         else if (a == L"--selftest-install") selftest = true;
+        else if (a == L"--selftest-play" && i + 1 < argc) playExe = U(argv[++i]);
         else if (a == L"--lang" && i + 1 < argc) g_langArg = U(argv[++i]);
     }
     LoadConfig();
     g_status = L_(u8"Готово", u8"Ready");
+    if (!playExe.empty()) {           // press Play the way the UI does (with g_mx held), report and exit
+        g_gameExe = playExe; g_gameArgs = "";
+        { std::lock_guard<std::mutex> l(g_mx); Play(); }
+        FILE *o = _wfopen(W(ExeDir() + "\\selftest.txt").c_str(), L"w"); fprintf(o, "play: %s\n", g_status.c_str()); fclose(o);
+        return 0;
+    }
     if (selftest) {                    // install every mod from the list into --game-dir and report (no window)
         AttachConsole(ATTACH_PARENT_PROCESS); FILE *o = _wfopen(W(ExeDir() + "\\selftest.txt").c_str(), L"w");
         LoadManifest();
