@@ -26,6 +26,8 @@
 #include <atomic>
 #include <functional>
 #include <algorithm>
+#include <cfloat>
+#include <cmath>
 #include "imgui.h"
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx11.h"
@@ -36,7 +38,7 @@
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
 
-static const char *LAUNCHER_VERSION = "0.1";
+static const char *LAUNCHER_VERSION = "0.2";
 static const char *DEFAULT_MANIFEST = "https://raw.githubusercontent.com/don-pardon42/edf6-mods/main/mods.json";
 
 // ---- small helpers ------------------------------------------------------------------------------
@@ -259,6 +261,7 @@ struct Mod {
 static std::string g_gameDir, g_plugins, g_disabled, g_lockPath, g_cfgPath, g_manifestSrc = DEFAULT_MANIFEST;
 static std::string g_gameExe = "EDF6.exe", g_gameArgs;
 static bool g_closeOnPlay = false;
+static int g_theme = 0;                 // index into g_themes (UI section)
 static std::vector<Mod> g_mods;
 static std::string g_modloaderPage = "https://github.com/BlueAmulet/EDFModLoader/releases";
 static std::mutex g_mx;                                  // guards g_mods / g_status while a worker runs
@@ -411,33 +414,223 @@ static void LoadConfig() {
     if (g_gameDir.empty()) g_gameDir = ExeDir();
     g_gameExe = get(L"GameExe", "EDF6.exe"); g_gameArgs = get(L"GameArgs", "");
     g_closeOnPlay = get(L"CloseOnPlay", "0") == "1";
-    std::string man = get(L"Manifest", DEFAULT_MANIFEST); if (g_manifestSrc == DEFAULT_MANIFEST && !man.empty()) g_manifestSrc = man;
     g_plugins = g_gameDir + "\\Mods\\Plugins"; g_disabled = g_plugins + "\\disabled"; g_lockPath = g_plugins + "\\edf6mods.lock.json";
 }
 
-// ---- UI --------------------------------------------------------------------------------------------------
-static const ImVec4 GOLD(0.89f, 0.73f, 0.23f, 1), GREEN(0.37f, 0.82f, 0.55f, 1), DIM(0.56f, 0.64f, 0.60f, 1), RED(0.88f, 0.42f, 0.33f, 1);
-static ImFont *g_bold;
-static std::unique_ptr<IniFile> g_edit; static std::string g_editTitle; static int g_captureLine = -1;
+// ---- UI: themes --------------------------------------------------------------------------------------------
+// One modern theme (plain window) and three "old PC game launcher" themes: a painted backdrop drawn in code
+// (night city, giant ants on the roofs, a mothership with a beam, searchlights, tracers), a chunky title,
+// slanted metal-plate buttons going down the screen, a "NEW!" starburst and a news ticker.
+// All art is procedural: no game assets or third-party pictures are used.
+struct Theme {
+    const char *name, *about; bool retro;
+    ImVec4 bg, panel, text, dim, accent, accent2, bad, button, buttonHover, frame;
+    ImU32 sky0, sky1, horizon, city, window, beam, ant, plate0, plate1;
+    float scanlines;              // 0..1
+};
+#define C4(r, g, b, a) ImVec4((r) / 255.f, (g) / 255.f, (b) / 255.f, (a))
+static Theme g_themes[] = {
+    { u8"Олдскул 2004", u8"Сумерки, хром и оранжевый неон — как лаунчеры с дисков из нулевых", true,
+      C4(9, 11, 26, 1), C4(16, 20, 42, 1), C4(240, 244, 255, 1), C4(150, 165, 200, 1), C4(255, 158, 31, 1), C4(115, 190, 255, 1), C4(255, 90, 70, 1),
+      C4(40, 48, 72, 1), C4(66, 78, 112, 1), C4(26, 32, 58, 1),
+      IM_COL32(6, 8, 34, 255), IM_COL32(70, 30, 96, 255), IM_COL32(255, 122, 40, 255), IM_COL32(8, 8, 18, 255), IM_COL32(255, 206, 120, 255),
+      IM_COL32(170, 215, 255, 55), IM_COL32(4, 4, 10, 255), IM_COL32(170, 180, 200, 255), IM_COL32(70, 78, 96, 255), 0.18f },
+};
+static const int THEME_COUNT = (int)(sizeof g_themes / sizeof g_themes[0]);
+static const Theme &TH() { return g_themes[g_theme]; }
 
-static void Style() {
+static ImFont *g_bold, *g_mid, *g_big;
+static std::unique_ptr<IniFile> g_edit; static std::string g_editTitle; static int g_captureLine = -1;
+enum Panel { P_NONE, P_MODS, P_SETTINGS };
+static Panel g_panel = P_NONE;
+
+static void ApplyTheme(int t) {
+    g_theme = std::max(0, std::min(THEME_COUNT - 1, t));
+    const Theme &T = TH();
     ImGuiStyle &st = ImGui::GetStyle();
-    st.WindowRounding = 0; st.FrameRounding = 3; st.FramePadding = ImVec2(8, 5); st.ItemSpacing = ImVec2(8, 6); st.CellPadding = ImVec2(8, 6);
+    st.WindowRounding = T.retro ? 2.f : 0.f; st.FrameRounding = T.retro ? 2.f : 3.f; st.FramePadding = ImVec2(8, 5);
+    st.ItemSpacing = ImVec2(8, 6); st.CellPadding = ImVec2(8, 6); st.WindowBorderSize = T.retro ? 2.0f : 1.0f;
     ImVec4 *c = st.Colors;
-    c[ImGuiCol_WindowBg] = ImVec4(0.05f, 0.07f, 0.06f, 1);
-    c[ImGuiCol_ChildBg] = ImVec4(0.08f, 0.11f, 0.10f, 1);
-    c[ImGuiCol_PopupBg] = ImVec4(0.07f, 0.10f, 0.09f, 0.98f);
-    c[ImGuiCol_Border] = ImVec4(0.24f, 0.32f, 0.28f, 1);
-    c[ImGuiCol_Text] = ImVec4(0.91f, 0.94f, 0.91f, 1);
-    c[ImGuiCol_TextDisabled] = DIM;
-    c[ImGuiCol_FrameBg] = ImVec4(0.12f, 0.17f, 0.15f, 1); c[ImGuiCol_FrameBgHovered] = ImVec4(0.17f, 0.23f, 0.20f, 1); c[ImGuiCol_FrameBgActive] = ImVec4(0.20f, 0.27f, 0.24f, 1);
-    c[ImGuiCol_Button] = ImVec4(0.14f, 0.20f, 0.17f, 1); c[ImGuiCol_ButtonHovered] = ImVec4(0.22f, 0.30f, 0.26f, 1); c[ImGuiCol_ButtonActive] = ImVec4(0.89f, 0.73f, 0.23f, 0.6f);
-    c[ImGuiCol_CheckMark] = GOLD; c[ImGuiCol_Header] = ImVec4(0.14f, 0.20f, 0.17f, 1); c[ImGuiCol_HeaderHovered] = ImVec4(0.22f, 0.30f, 0.26f, 1);
-    c[ImGuiCol_TableHeaderBg] = ImVec4(0.10f, 0.14f, 0.12f, 1); c[ImGuiCol_TableRowBgAlt] = ImVec4(1, 1, 1, 0.025f);
-    c[ImGuiCol_TableBorderLight] = ImVec4(0.17f, 0.23f, 0.20f, 1); c[ImGuiCol_TableBorderStrong] = ImVec4(0.24f, 0.32f, 0.28f, 1);
-    c[ImGuiCol_TitleBgActive] = ImVec4(0.10f, 0.14f, 0.12f, 1); c[ImGuiCol_TitleBg] = ImVec4(0.08f, 0.11f, 0.10f, 1);
-    c[ImGuiCol_Separator] = ImVec4(0.24f, 0.32f, 0.28f, 1);
+    c[ImGuiCol_WindowBg] = T.bg; c[ImGuiCol_ChildBg] = T.panel; c[ImGuiCol_PopupBg] = ImVec4(T.panel.x, T.panel.y, T.panel.z, 0.98f);
+    c[ImGuiCol_Border] = T.retro ? T.accent : T.frame; c[ImGuiCol_Text] = T.text; c[ImGuiCol_TextDisabled] = T.dim;
+    c[ImGuiCol_FrameBg] = T.frame; c[ImGuiCol_FrameBgHovered] = T.button; c[ImGuiCol_FrameBgActive] = T.buttonHover;
+    c[ImGuiCol_Button] = T.button; c[ImGuiCol_ButtonHovered] = T.buttonHover;
+    c[ImGuiCol_ButtonActive] = ImVec4(T.accent.x, T.accent.y, T.accent.z, 0.6f);
+    c[ImGuiCol_CheckMark] = T.accent; c[ImGuiCol_Header] = T.button; c[ImGuiCol_HeaderHovered] = T.buttonHover; c[ImGuiCol_HeaderActive] = T.buttonHover;
+    c[ImGuiCol_TableHeaderBg] = T.frame; c[ImGuiCol_TableRowBgAlt] = ImVec4(1, 1, 1, 0.025f);
+    c[ImGuiCol_TableBorderLight] = T.frame; c[ImGuiCol_TableBorderStrong] = T.button;
+    c[ImGuiCol_TitleBg] = T.panel; c[ImGuiCol_TitleBgActive] = T.button; c[ImGuiCol_Separator] = T.button;
+    c[ImGuiCol_ScrollbarBg] = T.panel; c[ImGuiCol_ScrollbarGrab] = T.button; c[ImGuiCol_ScrollbarGrabHovered] = T.buttonHover;
+    c[ImGuiCol_ModalWindowDimBg] = ImVec4(0, 0, 0, 0.55f);
 }
+static ImU32 A(ImU32 c, float a) { return (c & 0x00FFFFFF) | ((ImU32)(std::max(0.f, std::min(1.f, a)) * ((c >> 24) & 0xFF)) << 24); }
+static ImU32 Mix(ImU32 a, ImU32 b, float t) {
+    auto ch = [&](int s) { return (ImU32)((((a >> s) & 0xFF) * (1 - t) + ((b >> s) & 0xFF) * t)) << s; };
+    return ch(0) | ch(8) | ch(16) | ch(24);
+}
+static ImU32 U32(const ImVec4 &v, float a = 1) { return ImGui::ColorConvertFloat4ToU32(ImVec4(v.x, v.y, v.z, v.w * a)); }
+static uint32_t g_rng;
+static float Rnd() { g_rng = g_rng * 1664525u + 1013904223u; return (g_rng >> 8) / 16777216.0f; }
+static void OutlinedText(ImDrawList *dl, ImFont *f, float size, ImVec2 p, ImU32 col, ImU32 outline, const char *s, float th = 2) {
+    for (int dx = -1; dx <= 1; ++dx) for (int dy = -1; dy <= 1; ++dy) if (dx || dy) dl->AddText(f, size, ImVec2(p.x + dx * th, p.y + dy * th), outline, s);
+    dl->AddText(f, size, p, col, s);
+}
+// a giant ant in profile: abdomen, thorax, head, six legs, antennae
+static void DrawAnt(ImDrawList *dl, ImVec2 c, float s, ImU32 col, ImU32 rim, float t, bool faceLeft) {
+    float d = faceLeft ? -1.f : 1.f;
+    ImVec2 abd(c.x - d * 1.15f * s, c.y - 0.05f * s), tho(c.x, c.y - 0.15f * s), head(c.x + d * 0.95f * s, c.y - 0.35f * s);
+    for (int i = 0; i < 3; ++i) {                     // legs, three pairs, slowly stepping
+        float bx = c.x + d * (-0.25f + i * 0.3f) * s, ph = sinf(t * 2.2f + i * 2.1f) * 0.12f * s;
+        ImVec2 k(bx + d * (0.2f * s + ph), c.y - 0.55f * s), f(bx + d * (0.55f * s + ph), c.y + 0.75f * s);
+        ImVec2 k2(bx - d * (0.1f * s - ph), c.y - 0.45f * s), f2(bx - d * (0.35f * s - ph), c.y + 0.75f * s);
+        float o = std::max(2.0f, 0.035f * s);
+        dl->AddLine(ImVec2(bx, c.y - 0.1f * s), k, rim, 0.11f * s + o); dl->AddLine(k, f, rim, 0.08f * s + o);
+        dl->AddLine(ImVec2(bx, c.y - 0.1f * s), k2, rim, 0.10f * s + o); dl->AddLine(k2, f2, rim, 0.07f * s + o);
+        dl->AddLine(ImVec2(bx, c.y - 0.1f * s), k, col, 0.11f * s); dl->AddLine(k, f, col, 0.08f * s);
+        dl->AddLine(ImVec2(bx, c.y - 0.1f * s), k2, col, 0.10f * s); dl->AddLine(k2, f2, col, 0.07f * s);
+    }
+    float ro = std::max(2.0f, 0.035f * s);
+    dl->AddEllipseFilled(abd, ImVec2(0.75f * s + ro, 0.48f * s + ro), rim, d * 0.25f);
+    dl->AddEllipseFilled(tho, ImVec2(0.42f * s + ro, 0.26f * s + ro), rim, -d * 0.2f);
+    dl->AddCircleFilled(head, 0.3f * s + ro, rim);
+    dl->AddEllipseFilled(abd, ImVec2(0.75f * s, 0.48f * s), col, d * 0.25f);
+    dl->AddEllipse(abd, ImVec2(0.75f * s, 0.48f * s), rim, d * 0.25f, 0, 0.04f * s);
+    dl->AddEllipseFilled(tho, ImVec2(0.42f * s, 0.26f * s), col, -d * 0.2f);
+    dl->AddCircleFilled(head, 0.3f * s, col);
+    dl->AddCircle(head, 0.3f * s, rim, 0, 0.04f * s);
+    float aw = sinf(t * 3.1f) * 0.08f * s;
+    dl->AddBezierQuadratic(head, ImVec2(head.x + d * 0.3f * s, head.y - 0.7f * s), ImVec2(head.x + d * (0.75f * s + aw), head.y - 0.55f * s), col, 0.05f * s);
+    dl->AddBezierQuadratic(head, ImVec2(head.x + d * 0.5f * s, head.y - 0.6f * s), ImVec2(head.x + d * (0.95f * s - aw), head.y - 0.25f * s), col, 0.05f * s);
+    dl->AddCircleFilled(ImVec2(head.x + d * 0.12f * s, head.y - 0.05f * s), 0.06f * s, rim);   // eye glint
+}
+
+// ---- the backdrop -------------------------------------------------------------------------------------------
+static void DrawArt(ImDrawList *dl, ImVec2 p0, ImVec2 p1, const Theme &T, float t) {
+    float Wd = p1.x - p0.x, Ht = p1.y - p0.y;
+    auto P = [&](float x, float y) { return ImVec2(p0.x + x * Wd, p0.y + y * Ht); };
+    dl->AddRectFilledMultiColor(p0, p1, T.sky0, T.sky0, T.sky1, T.sky1);
+    // stars
+    g_rng = 7;
+    for (int i = 0; i < 140; ++i) {
+        float x = Rnd(), y = Rnd() * 0.55f, s = 0.6f + Rnd() * 1.4f, tw = 0.5f + 0.5f * sinf(t * (1.5f + Rnd() * 2) + i);
+        dl->AddCircleFilled(P(x, y), s, A(IM_COL32(255, 255, 255, 255), 0.25f + 0.6f * tw * (1 - y)));
+    }
+    // planet with halo
+    ImVec2 moon = P(0.16f, 0.24f); float mr = 0.085f * Ht;
+    for (int i = 6; i > 0; --i) dl->AddCircleFilled(moon, mr * (1 + i * 0.22f), A(T.horizon, 0.035f));
+    dl->AddCircleFilled(moon, mr, Mix(T.window, IM_COL32(255, 255, 255, 255), 0.4f));
+    dl->AddCircleFilled(ImVec2(moon.x + mr * 0.35f, moon.y - mr * 0.15f), mr * 0.85f, A(T.sky0, 0.55f));
+    // the mothership: drifts slowly, blinking rim lights, tractor beam
+    ImVec2 ship = P(0.50f + sinf(t * 0.11f) * 0.03f, 0.17f + sinf(t * 0.37f) * 0.006f);
+    float sw = 0.20f * Wd, sh = 0.045f * Ht;
+    ImVec2 beamTop1(ship.x - sw * 0.18f, ship.y + sh * 0.6f), beamTop2(ship.x + sw * 0.18f, ship.y + sh * 0.6f);
+    float bp = 0.5f + 0.5f * sinf(t * 1.3f);
+    dl->AddQuadFilled(beamTop1, beamTop2, P(0.62f, 0.86f), P(0.40f, 0.86f), A(T.beam, 0.5f + 0.5f * bp));
+    dl->AddEllipseFilled(ImVec2(ship.x, ship.y - sh * 0.5f), ImVec2(sw * 0.35f, sh * 0.9f), Mix(T.city, T.plate1, 0.5f));
+    dl->AddEllipseFilled(ship, ImVec2(sw * 0.5f, sh), Mix(T.city, T.plate1, 0.35f));
+    dl->AddEllipse(ship, ImVec2(sw * 0.5f, sh), A(T.horizon, 0.6f), 0, 0, 2.0f);
+    for (int i = 0; i < 14; ++i) {
+        float a = -3.14159f + i * 3.14159f / 13, on = sinf(t * 4 + i * 0.9f) > 0.2f ? 1.f : 0.25f;
+        dl->AddCircleFilled(ImVec2(ship.x + cosf(a) * sw * 0.44f, ship.y + sinf(-a) * sh * -0.55f + sh * 0.2f), 2.6f, A(T.window, on));
+    }
+    // horizon glow and the burning skyline
+    dl->AddRectFilledMultiColor(P(0, 0.55f), p1, A(T.horizon, 0), A(T.horizon, 0), A(T.horizon, 0.55f), A(T.horizon, 0.55f));
+    g_rng = 1234;
+    float x = -0.02f; std::vector<std::pair<ImVec2, ImVec2>> roofs;
+    while (x < 1.02f) {
+        float w = 0.03f + Rnd() * 0.06f, h = 0.10f + Rnd() * 0.30f;
+        if (x > 0.58f && x < 0.70f) h *= 0.55f;                   // a gap under the beam
+        ImVec2 a = P(x, 1 - h), b = P(x + w, 1);
+        dl->AddRectFilled(a, b, T.city);
+        dl->AddLine(a, ImVec2(b.x, a.y), A(T.horizon, 0.35f), 1.5f);
+        for (float wy = a.y + 8; wy < b.y - 6; wy += 11)          // windows, some flicker
+            for (float wx = a.x + 5; wx < b.x - 5; wx += 9)
+                if (Rnd() < 0.33f) dl->AddRectFilled(ImVec2(wx, wy), ImVec2(wx + 4, wy + 5), A(T.window, (Rnd() < 0.1f ? 0.5f + 0.5f * sinf(t * 7 + wx) : 0.75f) * 0.8f));
+        roofs.push_back({ a, ImVec2(b.x, a.y) });
+        x += w + Rnd() * 0.01f;
+    }
+    // searchlights sweeping the sky
+    for (int i = 0; i < 3; ++i) {
+        ImVec2 base = P(0.12f + i * 0.33f, 1.0f);
+        float ang = -1.57f + sinf(t * (0.35f + i * 0.13f) + i * 2) * 0.55f, len = Ht * 1.1f, spread = 0.06f;
+        dl->AddTriangleFilled(base, ImVec2(base.x + cosf(ang - spread) * len, base.y + sinf(ang - spread) * len),
+                              ImVec2(base.x + cosf(ang + spread) * len, base.y + sinf(ang + spread) * len), A(T.beam, 0.55f));
+    }
+    // tracers fired at the ship
+    for (int i = 0; i < 6; ++i) {
+        float ph = fmodf(t * 0.9f + i * 0.37f, 1.f);
+        ImVec2 from = P(0.05f + i * 0.17f, 0.98f), to(ship.x + (i - 3) * 20.f, ship.y + sh);
+        ImVec2 a(from.x + (to.x - from.x) * ph, from.y + (to.y - from.y) * ph), b(from.x + (to.x - from.x) * (ph + 0.05f), from.y + (to.y - from.y) * (ph + 0.05f));
+        dl->AddLine(a, b, A(T.window, 1 - ph), 2.0f);
+    }
+    // ants on the roofs and a huge one in front
+    if (roofs.size() > 8) {
+        auto onRoof = [&](size_t k, float s, bool left) { ImVec2 r = roofs[k].first; DrawAnt(dl, ImVec2((r.x + roofs[k].second.x) / 2, r.y - s * 0.75f), s, T.ant, A(T.horizon, 0.7f), t + k, left); };
+        onRoof(2, 0.030f * Ht, false); onRoof(roofs.size() - 4, 0.026f * Ht, true); onRoof(roofs.size() / 2 + 1, 0.022f * Ht, true);
+    }
+    DrawAnt(dl, P(0.20f, 0.90f), 0.11f * Ht, T.ant, A(T.horizon, 0.9f), t * 0.6f, false);
+    // CRT scanlines and a vignette
+    if (T.scanlines > 0) for (float y = p0.y; y < p1.y; y += 3) dl->AddLine(ImVec2(p0.x, y), ImVec2(p1.x, y), A(IM_COL32(0, 0, 0, 255), T.scanlines * 0.45f));
+    float v = 0.22f * Wd;
+    dl->AddRectFilledMultiColor(p0, ImVec2(p0.x + v, p1.y), IM_COL32(0, 0, 0, 150), 0, 0, IM_COL32(0, 0, 0, 150));
+    dl->AddRectFilledMultiColor(ImVec2(p1.x - v, p0.y), p1, 0, IM_COL32(0, 0, 0, 120), IM_COL32(0, 0, 0, 120), 0);
+}
+
+// slanted metal plate button with rivets; hazard stripes and a glow when hovered
+static bool PlateButton(const char *id, const char *label, ImVec2 pos, ImVec2 size, bool primary, bool enabled = true) {
+    const Theme &T = TH();
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    float skew = size.y * 0.45f;
+    ImGui::SetCursorScreenPos(pos);
+    bool clicked = ImGui::InvisibleButton(id, ImVec2(size.x + skew, size.y)) && enabled;
+    bool hov = ImGui::IsItemHovered() && enabled, act = ImGui::IsItemActive() && enabled;
+    ImVec2 o(pos.x + (act ? 3.f : 0.f), pos.y + (act ? 3.f : 0.f));
+    ImVec2 q[4] = { ImVec2(o.x + skew, o.y), ImVec2(o.x + size.x + skew, o.y), ImVec2(o.x + size.x, o.y + size.y), ImVec2(o.x, o.y + size.y) };
+    float t = (float)ImGui::GetTime();
+    // shadow
+    dl->AddQuadFilled(ImVec2(q[0].x + 6, q[0].y + 7), ImVec2(q[1].x + 6, q[1].y + 7), ImVec2(q[2].x + 6, q[2].y + 7), ImVec2(q[3].x + 6, q[3].y + 7), IM_COL32(0, 0, 0, 140));
+    ImU32 top = primary ? U32(T.accent) : T.plate0, bot = primary ? Mix(U32(T.accent), IM_COL32(0, 0, 0, 255), 0.55f) : T.plate1;
+    if (!enabled) { top = Mix(top, IM_COL32(60, 60, 60, 255), 0.7f); bot = Mix(bot, IM_COL32(30, 30, 30, 255), 0.7f); }
+    if (hov) { top = Mix(top, IM_COL32(255, 255, 255, 255), 0.18f); }
+    // metal gradient: split the parallelogram into upper and lower halves
+    ImVec2 ml(o.x + skew * 0.5f, o.y + size.y * 0.5f), mr(o.x + size.x + skew * 0.5f, o.y + size.y * 0.5f);
+    dl->AddQuadFilled(q[0], q[1], mr, ml, top);
+    dl->AddQuadFilled(ml, mr, q[2], q[3], bot);
+    if (hov) {                                               // hazard stripes run along the plate
+        dl->PushClipRect(ImVec2(o.x, o.y), ImVec2(o.x + size.x + skew, o.y + size.y), true);
+        for (float sx = o.x - 60 + fmodf(t * 60, 30); sx < o.x + size.x + skew; sx += 30)
+            dl->AddQuadFilled(ImVec2(sx, o.y + size.y), ImVec2(sx + 12, o.y + size.y), ImVec2(sx + 12 + skew, o.y), ImVec2(sx + skew, o.y), A(IM_COL32(0, 0, 0, 255), 0.18f));
+        dl->PopClipRect();
+    }
+    dl->AddPolyline(q, 4, hov ? U32(T.accent) : A(IM_COL32(255, 255, 255, 255), 0.35f), ImDrawFlags_Closed, hov ? 3.f : 1.5f);
+    dl->AddLine(q[0], q[1], A(IM_COL32(255, 255, 255, 255), 0.5f), 1.5f);           // top bevel highlight
+    for (int i = 0; i < 4; ++i) {                                                    // rivets
+        ImVec2 r((q[i].x + (i < 2 ? 0 : 0)) + (i == 0 || i == 3 ? 12.f : -12.f), q[i].y + (i < 2 ? 9.f : -9.f));
+        dl->AddCircleFilled(r, 3.2f, A(IM_COL32(0, 0, 0, 255), 0.45f)); dl->AddCircleFilled(ImVec2(r.x - 0.8f, r.y - 0.8f), 1.8f, A(IM_COL32(255, 255, 255, 255), 0.55f));
+    }
+    ImFont *f = primary ? g_big : g_mid; float fs = primary ? size.y * 0.62f : size.y * 0.52f;
+    ImVec2 ts = f->CalcTextSizeA(fs, FLT_MAX, 0, label);
+    ImVec2 tp(o.x + skew * 0.5f + (size.x - ts.x) * 0.5f, o.y + (size.y - ts.y) * 0.5f);
+    if (hov) OutlinedText(dl, f, fs, ImVec2(tp.x - 28 - fabsf(sinf(t * 6)) * 6, tp.y), U32(T.accent), IM_COL32(0, 0, 0, 255), u8"»", 1.5f);
+    OutlinedText(dl, f, fs, tp, enabled ? (primary ? IM_COL32(20, 14, 4, 255) : U32(T.text)) : IM_COL32(150, 150, 150, 255),
+                 primary ? A(IM_COL32(255, 255, 255, 255), 0.35f) : IM_COL32(0, 0, 0, 200), label, primary ? 1.0f : 2.0f);
+    return clicked;
+}
+// rotating starburst sticker ("NEW!") in the old-launcher spirit
+static void Starburst(ImVec2 c, float r, const char *line1, const char *line2) {
+    ImDrawList *dl = ImGui::GetWindowDrawList(); const Theme &T = TH();
+    float t = (float)ImGui::GetTime(), rot = t * 0.4f, pulse = 1 + 0.06f * sinf(t * 5);
+    ImVec2 pts[32];
+    for (int i = 0; i < 32; ++i) { float a = rot + i * 6.2832f / 32, rr = (i & 1 ? 0.72f : 1.0f) * r * pulse; pts[i] = ImVec2(c.x + cosf(a) * rr, c.y + sinf(a) * rr); }
+    for (int i = 0; i < 32; ++i) dl->AddTriangleFilled(c, pts[i], pts[(i + 1) % 32], U32(T.accent2));   // a star is not convex: fan from the centre
+    dl->AddPolyline(pts, 32, IM_COL32(255, 255, 255, 200), ImDrawFlags_Closed, 2);
+    float fs = r * 0.36f;
+    ImVec2 s1 = g_mid->CalcTextSizeA(fs, FLT_MAX, 0, line1), s2 = g_mid->CalcTextSizeA(fs * 0.8f, FLT_MAX, 0, line2);
+    OutlinedText(dl, g_mid, fs, ImVec2(c.x - s1.x / 2, c.y - s1.y * 0.95f), IM_COL32(255, 255, 255, 255), IM_COL32(0, 0, 0, 220), line1, 1.5f);
+    OutlinedText(dl, g_mid, fs * 0.8f, ImVec2(c.x - s2.x / 2, c.y + 1), IM_COL32(255, 255, 255, 255), IM_COL32(0, 0, 0, 220), line2, 1.5f);
+}
+
+// ---- ini editor (shared by all themes) -------------------------------------------------------------------
 static std::string KeyName(int vk) {
     UINT sc = MapVirtualKeyW(vk, MAPVK_VK_TO_VSC); wchar_t b[64] = {};
     if (vk >= VK_F1 && vk <= VK_F24) return "F" + std::to_string(vk - VK_F1 + 1);
@@ -447,18 +640,17 @@ static std::string KeyName(int vk) {
 static bool IsBoolLine(const IniLine &L) {
     return (L.value == "0" || L.value == "1") && (L.hint.find("1 =") != std::string::npos || L.hint.find("0 =") != std::string::npos);
 }
-static bool IsKeyLine(const IniLine &L) {
-    return L.key.size() > 3 && L.key.compare(L.key.size() - 3, 3, "Key") == 0;
-}
+static bool IsKeyLine(const IniLine &L) { return L.key.size() > 3 && L.key.compare(L.key.size() - 3, 3, "Key") == 0; }
 static void DrawIniEditor() {
     if (!g_edit) return;
-    ImGuiIO &io = ImGui::GetIO();
+    ImGuiIO &io = ImGui::GetIO(); const Theme &T = TH();
     ImGui::SetNextWindowSize(ImVec2(io.DisplaySize.x * 0.82f, io.DisplaySize.y * 0.82f), ImGuiCond_Appearing);
     ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowFocus();
     bool open = true;
     std::string title = u8"Настройки: " + g_editTitle + (g_edit->dirty ? " *" : "") + "###ini";
     if (ImGui::Begin(title.c_str(), &open, ImGuiWindowFlags_NoCollapse)) {
-        ImGui::TextColored(DIM, "%s", g_edit->path.c_str());
+        ImGui::TextColored(T.dim, "%s", g_edit->path.c_str());
         ImGui::BeginChild("lines", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() * 1.4f), true);
         if (ImGui::BeginTable("ini", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
             ImGui::TableSetupColumn("k", ImGuiTableColumnFlags_WidthFixed, 230); ImGui::TableSetupColumn("v");
@@ -481,7 +673,7 @@ static void DrawIniEditor() {
                     ImGui::SetNextItemWidth(-1);
                     if (ImGui::InputText("##v", buf, sizeof buf)) { L.value = buf; g_edit->dirty = true; }
                 }
-                if (!L.hint.empty()) { ImGui::PushTextWrapPos(0); ImGui::TextColored(DIM, "%s", L.hint.c_str()); ImGui::PopTextWrapPos(); }
+                if (!L.hint.empty()) { ImGui::PushTextWrapPos(0); ImGui::TextColored(T.dim, "%s", L.hint.c_str()); ImGui::PopTextWrapPos(); }
                 ImGui::PopID();
             }
             ImGui::EndTable();
@@ -490,11 +682,10 @@ static void DrawIniEditor() {
         if (ImGui::Button(u8"Сохранить")) { if (SaveIni(*g_edit)) Status(u8"Настройки сохранены: " + g_edit->path); else Status(u8"Не удалось сохранить настройки"); }
         ImGui::SameLine(); if (ImGui::Button(u8"Открыть в Блокноте")) ShellExecuteW(nullptr, L"open", L"notepad.exe", W("\"" + g_edit->path + "\"").c_str(), nullptr, SW_SHOWNORMAL);
         ImGui::SameLine(); if (ImGui::Button(u8"Перечитать")) { std::string p = g_edit->path; LoadIni(p, *g_edit); }
-        ImGui::SameLine(); ImGui::TextColored(DIM, u8"Наведите на имя параметра — подсказка. Изменения действуют после перезапуска игры.");
+        ImGui::SameLine(); ImGui::TextColored(T.dim, u8"Наведите на имя параметра — подсказка. Изменения действуют после перезапуска игры.");
     }
     ImGui::End();
-    // key capture: the next key pressed becomes the value
-    if (g_captureLine >= 0) {
+    if (g_captureLine >= 0) {                                    // the next key pressed becomes the value
         for (int vk = 8; vk < 256; ++vk) {
             if (vk == VK_LBUTTON || vk == VK_RBUTTON || vk == VK_MBUTTON || vk == VK_SHIFT || vk == VK_CONTROL || vk == VK_MENU) continue;
             if (GetAsyncKeyState(vk) & 1) {
@@ -508,38 +699,21 @@ static void DrawIniEditor() {
 static void OpenIni(const Mod &m) {
     std::string p = g_plugins + "\\" + IniOf(m);
     auto ini = std::make_unique<IniFile>();
-    if (!LoadIni(p, *ini)) { Status(u8"Нет файла настроек " + p + u8" — установите мод"); return; }
+    if (!LoadIni(p, *ini)) { g_status = u8"Нет файла настроек " + p + u8" — установите мод"; return; }
     g_edit = std::move(ini); g_editTitle = m.id;
 }
+static void OpenLauncherIni() { auto ini = std::make_unique<IniFile>(); if (LoadIni(g_cfgPath, *ini)) { g_edit = std::move(ini); g_editTitle = "EDF6 Launcher"; } }
+static bool AnyUpdate() { for (auto &m : g_mods) if (m.inManifest && m.present && m.installed != m.version) return true; return false; }
+static int MissingCount() { int n = 0; for (auto &m : g_mods) if (m.inManifest && !m.present) ++n; return n; }
 
-static void DrawMain() {
-    ImGuiIO &io = ImGui::GetIO();
-    ImGui::SetNextWindowPos(ImVec2(0, 0)); ImGui::SetNextWindowSize(io.DisplaySize);
-    ImGui::Begin("main", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings);
-    bool busy = g_busy;
-    std::lock_guard<std::mutex> lock(g_mx);
-
-    ImGui::PushFont(g_bold); ImGui::TextColored(GOLD, "EDF6"); ImGui::SameLine(); ImGui::Text("LAUNCHER"); ImGui::PopFont();
-    ImGui::SameLine(); ImGui::TextColored(DIM, u8"  версия %s", LAUNCHER_VERSION);
-    ImGui::TextColored(DIM, u8"Папка игры: %s", g_gameDir.c_str());
-    bool ml = ModLoaderOk();
-    if (ml) ImGui::TextColored(GREEN, u8"EDFModLoader установлен");
-    else {
-        ImGui::TextColored(RED, u8"EDFModLoader не найден (нет winmm.dll или EDFModLoader.dll) — моды не загрузятся");
-        ImGui::SameLine(); if (ImGui::SmallButton(u8"Скачать EDFModLoader")) OpenPath(g_modloaderPage);
-    }
-    if (!Exists(g_gameDir + "\\" + g_gameExe) && g_gameExe.find(':') == std::string::npos)
-        ImGui::TextColored(RED, u8"В папке игры нет %s — укажите GameDir/GameExe в EDF6Launcher.ini", g_gameExe.c_str());
-    ImGui::Spacing();
-
-    ImGui::PushFont(g_bold); ImGui::Text(u8"МОДЫ"); ImGui::PopFont();
-    float bottom = ImGui::GetFrameHeightWithSpacing() * 2.4f;
-    ImGui::BeginChild("mods", ImVec2(0, -bottom), true);
+// ---- shared pieces (caller holds g_mx) -----------------------------------------------------------------------
+static void DrawModsTable(bool busy) {
+    const Theme &T = TH();
     if (ImGui::BeginTable("mods", 5, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) {
         ImGui::TableSetupColumn(u8"Вкл", ImGuiTableColumnFlags_WidthFixed, 40);
         ImGui::TableSetupColumn(u8"Мод");
-        ImGui::TableSetupColumn(u8"Установлен", ImGuiTableColumnFlags_WidthFixed, 110);
-        ImGui::TableSetupColumn(u8"На GitHub", ImGuiTableColumnFlags_WidthFixed, 110);
+        ImGui::TableSetupColumn(u8"Установлен", ImGuiTableColumnFlags_WidthFixed, 100);
+        ImGui::TableSetupColumn(u8"На GitHub", ImGuiTableColumnFlags_WidthFixed, 100);
         ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 380);
         ImGui::TableHeadersRow();
         for (size_t i = 0; i < g_mods.size(); ++i) {
@@ -551,18 +725,18 @@ static void DrawMain() {
             ImGui::EndDisabled();
             ImGui::TableNextColumn();
             ImGui::PushFont(g_bold); ImGui::Text("%s", m.id.c_str()); ImGui::PopFont();
-            if (!m.inManifest) { ImGui::SameLine(); ImGui::TextColored(DIM, u8"(не из репозитория)"); }
-            if (!m.description.empty()) { ImGui::PushTextWrapPos(); ImGui::TextColored(DIM, "%s", m.description.c_str()); ImGui::PopTextWrapPos(); }
+            if (!m.inManifest) { ImGui::SameLine(); ImGui::TextColored(T.dim, u8"(не из репозитория)"); }
+            if (!m.description.empty()) { ImGui::PushTextWrapPos(); ImGui::TextColored(T.dim, "%s", m.description.c_str()); ImGui::PopTextWrapPos(); }
             ImGui::TableNextColumn();
-            if (!m.present) ImGui::TextColored(DIM, u8"нет");
+            if (!m.present) ImGui::TextColored(T.dim, u8"нет");
             else if (m.installed == "?") { ImGui::Text(u8"есть"); if (ImGui::IsItemHovered()) ImGui::SetTooltip(u8"Установлен вручную, версия неизвестна"); }
             else ImGui::Text("%s", m.installed.c_str());
             ImGui::TableNextColumn();
             bool upd = m.inManifest && m.present && m.installed != m.version;
-            if (!m.inManifest) ImGui::TextColored(DIM, "-");
+            if (!m.inManifest) ImGui::TextColored(T.dim, "-");
             else if (!m.present) ImGui::Text("%s", m.version.c_str());
-            else if (upd) ImGui::TextColored(GOLD, u8"%s ↑", m.version.c_str());
-            else ImGui::TextColored(GREEN, u8"%s ✓", m.version.c_str());
+            else if (upd) ImGui::TextColored(T.accent, u8"%s ↑", m.version.c_str());
+            else ImGui::TextColored(T.accent2, u8"%s ✓", m.version.c_str());
             ImGui::TableNextColumn();
             ImGui::BeginDisabled(busy);
             if (m.inManifest && (!m.present || upd)) {
@@ -586,15 +760,13 @@ static void DrawMain() {
         }
         ImGui::EndTable();
     }
-    if (g_mods.empty()) ImGui::TextColored(DIM, u8"Список модов пуст: %s", g_manifestOk ? "" : g_manifestErr.c_str());
-    ImGui::EndChild();
-
-    // bottom bar
+    if (g_mods.empty()) ImGui::TextColored(T.dim, u8"Список модов пуст: %s", g_manifestOk ? "" : g_manifestErr.c_str());
+}
+static void UpdateButtons(bool busy) {
     ImGui::BeginDisabled(busy);
     if (ImGui::Button(u8"Проверить обновления")) RunWorker([] { Status(u8"Проверяю..."); LoadManifest(); });
     ImGui::SameLine();
-    bool anyUpd = false; for (auto &m : g_mods) anyUpd |= m.inManifest && m.present && m.installed != m.version;
-    ImGui::BeginDisabled(!anyUpd);
+    ImGui::BeginDisabled(!AnyUpdate());
     if (ImGui::Button(u8"Обновить всё")) {
         std::vector<Mod> todo; for (auto &m : g_mods) if (m.inManifest && m.present && m.installed != m.version) todo.push_back(m);
         RunWorker([todo] { std::string all; for (auto &m : todo) { std::string msg; InstallMod(m, msg); all += msg + "; "; } Status(all); });
@@ -602,18 +774,125 @@ static void DrawMain() {
     ImGui::EndDisabled();
     ImGui::EndDisabled();
     ImGui::SameLine(); if (ImGui::Button(u8"Папка модов")) OpenPath(g_plugins);
-    ImGui::SameLine(); if (ImGui::Button(u8"Настройки лаунчера")) { auto ini = std::make_unique<IniFile>(); if (LoadIni(g_cfgPath, *ini)) { g_edit = std::move(ini); g_editTitle = "EDF6 Launcher"; } }
-    float playW = 200;
-    ImGui::SameLine(ImGui::GetWindowWidth() - playW - ImGui::GetStyle().WindowPadding.x);
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.62f, 0.49f, 0.12f, 1)); ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.80f, 0.64f, 0.18f, 1));
-    ImGui::PushFont(g_bold);
+}
+static void ModLoaderLine() {
+    const Theme &T = TH();
+    if (ModLoaderOk()) ImGui::TextColored(T.accent2, u8"EDFModLoader установлен");
+    else {
+        ImGui::TextColored(T.bad, u8"EDFModLoader не найден (нет winmm.dll или EDFModLoader.dll) — моды не загрузятся");
+        ImGui::SameLine(); if (ImGui::SmallButton(u8"Скачать EDFModLoader")) OpenPath(g_modloaderPage);
+    }
+    if (!Exists(g_gameDir + "\\" + g_gameExe) && g_gameExe.find(':') == std::string::npos)
+        ImGui::TextColored(T.bad, u8"В папке игры нет %s — укажите GameDir/GameExe в настройках лаунчера", g_gameExe.c_str());
+}
+
+// ---- retro layout --------------------------------------------------------------------------------------------
+static void DrawRetro(bool busy) {
+    ImGuiIO &io = ImGui::GetIO(); const Theme &T = TH();
+    float t = (float)ImGui::GetTime(), Wd = io.DisplaySize.x, Ht = io.DisplaySize.y;
+    ImGui::SetNextWindowPos(ImVec2(0, 0)); ImGui::SetNextWindowSize(io.DisplaySize);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::Begin("retro", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::PopStyleVar();
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    DrawArt(dl, ImVec2(0, 0), io.DisplaySize, T, t);
+
+    // title block, top left, a little crooked on purpose
+    float big = Ht * 0.105f;
+    OutlinedText(dl, g_big, big * 0.62f, ImVec2(Wd * 0.045f, Ht * 0.05f), U32(T.text), IM_COL32(0, 0, 0, 255), "EARTH DEFENSE FORCE", 3);
+    OutlinedText(dl, g_big, big * 2.0f, ImVec2(Wd * 0.045f + big * 0.1f, Ht * 0.05f + big * 0.48f), U32(T.accent), IM_COL32(0, 0, 0, 255), "6", 4);
+    OutlinedText(dl, g_mid, big * 0.42f, ImVec2(Wd * 0.045f + big * 1.25f, Ht * 0.05f + big * 0.95f), U32(T.accent2), IM_COL32(0, 0, 0, 255), u8"Л А У Н Ч Е Р   М О Д О В", 2);
+    OutlinedText(dl, g_bold, big * 0.24f, ImVec2(Wd * 0.045f + big * 1.27f, Ht * 0.05f + big * 1.45f), A(IM_COL32(255, 255, 255, 255), 0.8f), IM_COL32(0, 0, 0, 200),
+                 u8"Земля сама себя не защитит. Сначала — моды.", 1.5f);
+
+    // the plates: a diagonal stack on the right
+    struct B { const char *label; int action; };
     bool running = GameRunning();
-    ImGui::BeginDisabled(running);
-    if (ImGui::Button(running ? u8"ИГРА ЗАПУЩЕНА" : u8"ИГРАТЬ", ImVec2(playW, ImGui::GetFrameHeight() * 1.5f))) Play();
+    B buttons[] = { { running ? u8"ИГРА ИДЁТ" : u8"ИГРАТЬ", 0 }, { u8"МОДЫ", 1 }, { u8"НАСТРОЙКИ", 2 }, { u8"ОТЧЁТ", 3 }, { u8"ВЫХОД", 4 } };
+    float bw = Wd * 0.30f, bh = Ht * 0.085f, x0 = Wd * 0.60f, y0 = Ht * 0.24f;
+    ImGui::BeginDisabled(g_panel != P_NONE || g_edit != nullptr);
+    for (int i = 0; i < 5; ++i) {
+        float bx = x0 + i * Wd * 0.018f + (i == 0 ? -Wd * 0.03f : 0), by = y0 + i * (bh * 1.22f) + (i ? bh * 0.35f : 0);
+        ImVec2 sz = i == 0 ? ImVec2(bw * 1.12f, bh * 1.35f) : ImVec2(bw, bh);
+        if (PlateButton(buttons[i].label, buttons[i].label, ImVec2(bx, by), sz, i == 0, !(i == 0 && running))) {
+            switch (buttons[i].action) {
+            case 0: Play(); break;
+            case 1: g_panel = P_MODS; break;
+            case 2: g_panel = P_SETTINGS; break;
+            case 3: { std::string p = g_plugins + "\\EDFStats\\latest.html"; if (Exists(p)) OpenPath(p); else g_status = u8"Отчёта пока нет — сыграйте миссию с EDFStats"; } break;
+            case 4: PostQuitMessage(0); break;
+            }
+        }
+    }
     ImGui::EndDisabled();
-    ImGui::PopFont(); ImGui::PopStyleColor(2);
-    ImGui::TextColored(busy ? GOLD : DIM, "%s", g_status.c_str());
+    // stickers
+    if (!ModLoaderOk()) Starburst(ImVec2(x0 - Wd * 0.05f, y0 + bh * 2.1f), Ht * 0.075f, u8"НЕТ", u8"ЗАГРУЗЧИКА!");
+    else if (AnyUpdate()) Starburst(ImVec2(x0 - Wd * 0.04f, y0 + bh * 2.1f), Ht * 0.075f, u8"НОВОЕ!", u8"обновления");
+    else if (int n = MissingCount()) { std::string s = "+" + std::to_string(n); Starburst(ImVec2(x0 - Wd * 0.04f, y0 + bh * 2.1f), Ht * 0.07f, s.c_str(), n == 1 ? u8"новый мод" : u8"новых мода"); }
+
+    // installed mods as dog tags, bottom left
+    float ty = Ht * 0.62f;
+    OutlinedText(dl, g_mid, Ht * 0.032f, ImVec2(Wd * 0.045f, ty), U32(T.accent), IM_COL32(0, 0, 0, 255), u8"В СТРОЮ:", 2);
+    ty += Ht * 0.045f;
+    for (auto &m : g_mods) {
+        if (!m.present) continue;
+        std::string s = std::string(m.enabled ? u8"■ " : u8"□ ") + m.id + (m.installed != "?" && !m.installed.empty() ? "  v" + m.installed : "");
+        OutlinedText(dl, g_bold, Ht * 0.026f, ImVec2(Wd * 0.05f, ty), m.enabled ? U32(T.text) : U32(T.dim), IM_COL32(0, 0, 0, 220), s.c_str(), 1.5f);
+        ty += Ht * 0.034f;
+    }
+
+    // news ticker along the bottom
+    float th = Ht * 0.05f, tyy = Ht - th;
+    dl->AddRectFilled(ImVec2(0, tyy), ImVec2(Wd, tyy + th), A(U32(T.bg), 0.85f));
+    dl->AddLine(ImVec2(0, tyy), ImVec2(Wd, tyy), U32(T.accent), 2);
+    dl->AddRectFilled(ImVec2(0, tyy), ImVec2(Wd * 0.13f, tyy + th), U32(T.accent));
+    OutlinedText(dl, g_mid, th * 0.55f, ImVec2(Wd * 0.012f, tyy + th * 0.2f), IM_COL32(20, 14, 4, 255), A(IM_COL32(255, 255, 255, 255), 0.3f), u8"СВОДКА", 1);
+    std::string news = g_status + u8"   •   ";
+    for (auto &m : g_mods) if (m.inManifest) news += m.id + " " + m.version + u8"   •   ";
+    news += u8"Гигантские муравьи замечены в секторе 7   •   F6 в бою — панель урона, F7 — таблица   •   Не стреляйте по своим, EDFStats всё видит   •   ";
+    news += u8"Папка игры: " + g_gameDir + u8"   •   ";
+    ImVec2 ns = g_bold->CalcTextSizeA(th * 0.5f, FLT_MAX, 0, news.c_str());
+    float off = fmodf(t * 70.f, ns.x);
+    dl->PushClipRect(ImVec2(Wd * 0.13f, tyy), ImVec2(Wd, tyy + th), true);
+    for (float sx = Wd * 0.14f - off; sx < Wd; sx += ns.x) dl->AddText(g_bold, th * 0.5f, ImVec2(sx, tyy + th * 0.24f), U32(T.text), news.c_str());
+    dl->PopClipRect();
+    ImGui::SetCursorScreenPos(ImVec2(Wd - 110, 12));
+    ImGui::TextColored(T.dim, u8"версия %s", LAUNCHER_VERSION);
     ImGui::End();
+
+    // panels over the art
+    if (g_panel != P_NONE) {
+        ImGui::SetNextWindowSize(ImVec2(Wd * (g_panel == P_MODS ? 0.86f : 0.6f), g_panel == P_MODS ? Ht * 0.74f : Ht * 0.34f), ImGuiCond_Always);
+        ImGui::SetNextWindowPos(ImVec2(Wd * 0.5f, Ht * 0.47f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+        bool open = true;
+        const char *title = g_panel == P_MODS ? u8"АРСЕНАЛ МОДОВ###panel" : u8"НАСТРОЙКИ###panel";
+        ImGui::PushFont(g_bold);
+        if (ImGui::Begin(title, &open, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings)) {
+            ImGui::PopFont();
+            if (g_panel == P_MODS) {
+                ModLoaderLine();
+                ImGui::BeginChild("mods", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() * 1.3f), true);
+                DrawModsTable(busy);
+                ImGui::EndChild();
+                UpdateButtons(busy);
+            } else {
+                ImGui::PushFont(g_bold); ImGui::Text(u8"Игра"); ImGui::PopFont();
+                ImGui::TextColored(T.dim, u8"Папка: %s", g_gameDir.c_str());
+                ImGui::TextColored(T.dim, u8"Запуск: %s %s", g_gameExe.c_str(), g_gameArgs.c_str());
+                ModLoaderLine();
+                if (ImGui::Button(u8"Настройки лаунчера (папка, exe, аргументы)")) OpenLauncherIni();
+                ImGui::SameLine(); if (ImGui::Button(u8"Папка игры")) OpenPath(g_gameDir);
+            }
+        } else ImGui::PopFont();
+        ImGui::End();
+        if (!open) g_panel = P_NONE;
+    }
+}
+
+static void DrawRoot() {
+    bool busy = g_busy;
+    std::lock_guard<std::mutex> lock(g_mx);
+    DrawRetro(busy);
 }
 
 // ---- window + D3D11 (based on the Dear ImGui win32/dx11 example) ---------------------------------------
@@ -668,7 +947,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
 
     WNDCLASSEXW wc{ sizeof wc, CS_CLASSDC, WndProc, 0, 0, inst, LoadIconW(nullptr, IDI_APPLICATION), LoadCursorW(nullptr, IDC_ARROW), nullptr, nullptr, L"EDF6Launcher", nullptr };
     RegisterClassExW(&wc);
-    HWND hwnd = CreateWindowW(wc.lpszClassName, L"EDF6 Launcher", WS_OVERLAPPEDWINDOW, 100, 100, 1120, 680, nullptr, nullptr, inst, nullptr);
+    HWND hwnd = CreateWindowW(wc.lpszClassName, L"EDF6 Launcher", WS_OVERLAPPEDWINDOW, 80, 60, 1280, 760, nullptr, nullptr, inst, nullptr);
     DXGI_SWAP_CHAIN_DESC sd{}; sd.BufferCount = 2; sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     sd.OutputWindow = hwnd; sd.SampleDesc.Count = 1; sd.Windowed = TRUE; sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD; sd.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
     if (FAILED(D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &sd, &g_sc, &g_dev, nullptr, &g_ctx)) &&
@@ -680,13 +959,17 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
 
     ImGui::CreateContext();
     ImGuiIO &io = ImGui::GetIO(); io.IniFilename = nullptr;
-    static const ImWchar ranges[] = { 0x0020, 0x00FF, 0x0400, 0x052F, 0x2000, 0x206F, 0x2190, 0x21FF, 0x2700, 0x27BF, 0 };
+    static const ImWchar ranges[] = { 0x0020, 0x00FF, 0x0400, 0x052F, 0x2000, 0x206F, 0x2190, 0x21FF, 0x25A0, 0x25FF, 0x2600, 0x26FF, 0x2700, 0x27BF, 0 };
     wchar_t win[MAX_PATH]; GetWindowsDirectoryW(win, MAX_PATH);
     std::string fonts = U(win) + "\\Fonts\\";
     if (!Exists(fonts + "segoeui.ttf") || !io.Fonts->AddFontFromFileTTF((fonts + "segoeui.ttf").c_str(), 18.0f, nullptr, ranges)) io.Fonts->AddFontDefault();
     if (Exists(fonts + "seguisym.ttf")) { ImFontConfig mc; mc.MergeMode = true; io.Fonts->AddFontFromFileTTF((fonts + "seguisym.ttf").c_str(), 18.0f, &mc, ranges); }
     g_bold = Exists(fonts + "segoeuib.ttf") ? io.Fonts->AddFontFromFileTTF((fonts + "segoeuib.ttf").c_str(), 22.0f, nullptr, ranges) : io.Fonts->Fonts[0];
-    Style();
+    // chunky poster font for the retro themes (Impact has Cyrillic); Segoe UI Bold if it is missing
+    std::string poster = Exists(fonts + "impact.ttf") ? fonts + "impact.ttf" : fonts + "segoeuib.ttf";
+    g_mid = Exists(poster) ? io.Fonts->AddFontFromFileTTF(poster.c_str(), 34.0f, nullptr, ranges) : g_bold;
+    g_big = Exists(poster) ? io.Fonts->AddFontFromFileTTF(poster.c_str(), 96.0f, nullptr, ranges) : g_bold;
+    ApplyTheme(g_theme);
     ImGui_ImplWin32_Init(hwnd); ImGui_ImplDX11_Init(g_dev, g_ctx);
 
     if (shot.empty()) RunWorker([] { Status(u8"Загружаю список модов..."); LoadManifest(); });
@@ -699,21 +982,20 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
         if (done) break;
         if (g_resizeW) { if (g_rtv) { g_rtv->Release(); g_rtv = nullptr; } g_sc->ResizeBuffers(0, g_resizeW, g_resizeH, DXGI_FORMAT_UNKNOWN, 0); g_resizeW = g_resizeH = 0; MakeRtv(); }
         ImGui_ImplDX11_NewFrame(); ImGui_ImplWin32_NewFrame(); ImGui::NewFrame();
-        DrawMain(); DrawIniEditor();
+        DrawRoot(); DrawIniEditor();
         ImGui::Render();
         const float clear[4] = { 0.05f, 0.07f, 0.06f, 1 };
         g_ctx->OMSetRenderTargets(1, &g_rtv, nullptr); g_ctx->ClearRenderTargetView(g_rtv, clear);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
         if (!shot.empty() && ++frames == 4) {
-            SaveBmp(shot);
-            if (!g_mods.empty()) {   // second picture: the settings editor of the first mod
-                OpenIni(g_mods[0]);
-                for (int k = 0; k < 3; ++k) {
-                    ImGui_ImplDX11_NewFrame(); ImGui_ImplWin32_NewFrame(); ImGui::NewFrame(); DrawMain(); DrawIniEditor(); ImGui::Render();
-                    g_ctx->OMSetRenderTargets(1, &g_rtv, nullptr); g_ctx->ClearRenderTargetView(g_rtv, clear); ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-                }
-                SaveBmp(shot.substr(0, shot.size() - 4) + "_settings.bmp");
-            }
+            auto frame = [&] {
+                ImGui_ImplDX11_NewFrame(); ImGui_ImplWin32_NewFrame(); ImGui::NewFrame(); DrawRoot(); DrawIniEditor(); ImGui::Render();
+                g_ctx->OMSetRenderTargets(1, &g_rtv, nullptr); g_ctx->ClearRenderTargetView(g_rtv, clear); ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+            };
+            std::string base = shot.substr(0, shot.size() - 4);
+            for (int k = 0; k < 3; ++k) frame(); SaveBmp(base + "_main.bmp");
+            g_panel = P_MODS; for (int k = 0; k < 3; ++k) frame(); SaveBmp(base + "_mods.bmp");
+            g_panel = P_SETTINGS; for (int k = 0; k < 3; ++k) frame(); SaveBmp(base + "_settings.bmp");
             break;
         }
         g_sc->Present(1, 0);
