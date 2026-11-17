@@ -31,14 +31,15 @@
 #include <cmath>
 #include <string>
 #include <vector>
-#include <map>
+#include <map>
+#include <set>
 #include <unordered_map>
 #include <algorithm>
 #include "PluginAPI.h"
 #include "MinHook.h"
 #pragma comment(lib, "ws2_32.lib")
 
-static const char *VERSION = "0.9.1";
+static const char *VERSION = "0.9.2";
 // ---- language: Russian for ru/uk/be/kk Windows, English otherwise; EDFStats.ini Language=auto|ru|en overrides
 static bool g_en = false;
 static inline const char *L_(const char *ru, const char *en) { return g_en ? en : ru; }
@@ -313,6 +314,13 @@ static void NetSend() {                // caller holds g_cs
 }
 // one stats packet from another player, from either transport. caller holds g_cs
 static void OnPacket(const void *data, size_t n, const char *via) {
+    if (n >= 8 && ((const uint32_t *)data)[0] == MAGIC && (((const uint32_t *)data)[1] != PROTO || n != sizeof(Packet))) {
+        static std::set<std::string> warned;
+        if (warned.insert(via).second)
+            Log("WARNING: stats from %s use another EDFStats version (protocol %u, %u bytes; this PC: protocol %u). "
+                "Everybody needs the same EDFStats version", via, ((const uint32_t *)data)[1], (unsigned)n, PROTO);
+        return;
+    }
     if (n != sizeof(Packet)) return;
     Packet k; memcpy(&k, data, sizeof k);
     if (k.magic != MAGIC || k.version != PROTO || k.sender == g_self) return;
@@ -515,7 +523,7 @@ static volatile bool g_autoBoard;      // scoreboard shown by itself on the resu
 static uint64_t g_lastLocalMs;          // last hit this machine's player took part in
 static std::map<uint8_t *, uint64_t> g_downMs;          // player soldier -> when it went down (this mission)
 static uint64_t g_lastFightMs;           // last hit any player took part in
-struct SlotInfo { uint8_t *obj = nullptr; uint64_t createdMs = 0; };
+struct SlotInfo { uint8_t *obj = nullptr; uint64_t createdMs = 0; bool down = false; };
 static std::map<unsigned, SlotInfo> g_slots;            // player slot -> its current character (cleared at mission end)
 // the game sometimes replaces this machine's player object in the middle of a mission
 // (seen 2026-11-14 about 2 min in, the other player's mission went on): keep counting on the new object
@@ -585,7 +593,8 @@ static uint8_t *__fastcall hCreatePlayer(unsigned slot, const float *where, int 
             float op[3]; if (!SafeRead(o + SB_POS, op, sizeof op)) continue;
             float dd = Dist3(op, pos); if (dd < bd) { bd = dd; best = o; }
         }
-        bool rescue = prevDown || (best && bd < 15.0f);
+        bool rescue = false;   // rescues are counted by PollRescues(); a new object here is only logged
+        (void)prevDown;
         if (rescue) {
             uint64_t downAt = g_downMs.count(prev) ? g_downMs[prev] : 0;
             Log("  rescue of slot %u, nearest player %p at %.1f m%s", slot, best, bd, best == g_localSol && best ? " (this PC)" : "");
@@ -598,9 +607,51 @@ static uint8_t *__fastcall hCreatePlayer(unsigned slot, const float *where, int 
         if (prev == g_localSol) RebindLocal(obj);           // keep counting on the new character
         else if (g_ps.count(prev)) { PStats moved = std::move(g_ps[prev]); g_ps.erase(prev); g_ps[obj] = std::move(moved); }
     }
-    si.obj = obj; si.createdMs = now;
+    si.obj = obj; si.createdMs = now; si.down = false;
     LeaveCriticalSection(&g_cs);
     return obj;
+}
+
+// ---- rescues: a downed player comes back on the same object (2026-11-18 test) -----------------
+// polled every 100 ms. down = dead flag set or HP <= 0; back up = neither. The closest other
+// living player gets the credit (rescuing needs standing next to the downed player).
+static const float RESCUE_RANGE = 10.0f;
+static void PollRescues() {               // caller holds g_cs
+    if (g_missionEnded || g_slots.empty()) return;
+    uint64_t now = GetTickCount64();
+    for (auto &kv : g_slots) {
+        SlotInfo &si = kv.second;
+        uint8_t *o = si.obj;
+        if (!o) continue;
+        float hp = 0; uint8_t dead = 1;
+        if (!SafeRead(o + GO_HP, &hp, sizeof hp) || !SafeRead(o + GO_DEAD, &dead, sizeof dead)) continue;
+        bool down = dead != 0 || !(hp > 0);
+        if (down && !si.down) {
+            if (!g_downMs.count(o)) g_downMs[o] = now;
+            Log("player down: slot %u %s %p (dead=%u hp=%.1f)", kv.first, ClassName(Cls(o).name), o, dead, hp);
+        } else if (!down && si.down) {
+            float pos[3] = {};
+            SafeRead(o + SB_POS, pos, sizeof pos);
+            uint8_t *best = nullptr; float bd = 1e9f;
+            for (auto &kw : g_slots) {
+                uint8_t *q = kw.second.obj;
+                if (kw.first == kv.first || !q || kw.second.down) continue;
+                float qp[3]; if (!SafeRead(q + SB_POS, qp, sizeof qp)) continue;
+                float dd = Dist3(qp, pos); if (dd < bd) { bd = dd; best = q; }
+            }
+            auto it = g_downMs.find(o);
+            uint64_t downAt = it != g_downMs.end() ? it->second : 0;
+            if (it != g_downMs.end()) g_downMs.erase(it);
+            bool credited = best && bd <= RESCUE_RANGE;
+            Log("player rescued: slot %u %s %p (hp=%.1f, down %.1f s), nearest player %p %s at %.1f m%s", kv.first,
+                ClassName(Cls(o).name), o, hp, downAt ? (now - downAt) / 1000.0 : 0.0, best,
+                best ? ClassName(Cls(best).name) : "-", bd < 1e8f ? bd : -1.0f,
+                credited ? (best == g_localSol ? " -> rescued by this PC" : " -> rescued by another player") : " -> nobody close");
+            if (credited && best == g_localSol) ++P(best).revives;
+            if (o == g_localSol) { PStats &me = P(o); ++me.revived; if (downAt) me.downSecs += (now - downAt) / 1000.0; }
+        }
+        si.down = down;
+    }
 }
 
 // ---- hook -------------------------------------------------------------------------------------
@@ -945,7 +996,7 @@ static DWORD WINAPI Worker(LPVOID) {
         bool k1 = (GetAsyncKeyState(g_dumpKey) & 0x8000) != 0, k2 = (GetAsyncKeyState(g_resetKey) & 0x8000) != 0;
         EnterCriticalSection(&g_cs);
         NetReceive();
-        if (now - lastPos >= 100) { SampleDistance(); lastPos = now; }
+        if (now - lastPos >= 100) { SampleDistance(); PollRescues(); lastPos = now; }
         if (now - lastName >= 5000) { SteamName(); lastName = now; }
         if (now - lastSend >= (uint64_t)g_sendMs) { NetSend(); lastSend = now; }
         if (k1 && !d1) { NetSend(); WriteResults("F9"); fflush(g_log); }
