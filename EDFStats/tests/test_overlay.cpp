@@ -32,6 +32,7 @@ static void Frame(IDXGISwapChain *sc) {
 int main(int argc, char **argv) {
     InitializeCriticalSection(&g_cs); InitializeCriticalSection(&g_viewCs);
     g_log = stdout; std::string out = argv[1];
+    if (argc > 2 && !strcmp(argv[2], "en")) g_en = true;   // optional second argument: language
     WNDCLASSEXA wc{ sizeof wc }; wc.lpfnWndProc = DefWindowProcA; wc.hInstance = GetModuleHandleA(nullptr); wc.lpszClassName = "EDFStatsTest";
     RegisterClassExA(&wc);
     RECT r{ 0, 0, 1600, 900 }; AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);

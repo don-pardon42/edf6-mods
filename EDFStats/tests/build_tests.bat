@@ -12,6 +12,6 @@ if not exist out mkdir out
 for %%t in (test_network test_rescue test_overlay) do (
   cl /nologo /O2 /MT /EHsc /std:c++17 /utf-8 /W3 /I%SRC% /I%D% /I%D%\minhook\include /I%D%\imgui /I%D%\imgui\backends /Foobj\ %%t.cpp %LIBS% /Fe:out\%%t.exe /link ws2_32.lib user32.lib d3d11.lib >nul || (echo BUILD FAILED %%t & exit /b 1)
 )
-echo ==== network / report & out\test_network.exe "%CD%\out\\"
+echo ==== network / report & out\test_network.exe "%CD%\out\\" %1
 echo ==== rescue & out\test_rescue.exe
-echo ==== overlay (writes out\live.bmp and out\board.bmp) & out\test_overlay.exe "%CD%\out\\"
+echo ==== overlay (writes out\live.bmp and out\board.bmp) & out\test_overlay.exe "%CD%\out\\" %1

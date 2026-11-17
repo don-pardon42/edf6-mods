@@ -18,7 +18,8 @@ static int32_t FakeAccept(EOS_HP2P, const EOS_AcceptOpts *o) { ++accepted; retur
 
 int main(int argc, char **argv) {
     InitializeCriticalSection(&g_cs); InitializeCriticalSection(&g_eosCs); InitializeCriticalSection(&g_viewCs);
-    g_dir = argv[1]; g_log = stdout; g_name = u8"Игрок 1"; g_self = 0x1111;
+    g_dir = argv[1]; g_log = stdout;
+    if (argc > 2 && !strcmp(argv[2], "en")) g_en = true;   // optional second argument: language g_name = u8"Игрок 1"; g_self = 0x1111;
     g_port = 27901; ParsePeers("127.0.0.1", false); NetInit();
     g_missionStartMs = GetTickCount64() - 400000; GetLocalTime(&g_missionStart);
     static uint8_t fakeLocal[0x2000] = {}, fakeFencer[0x2000] = {};

@@ -38,7 +38,16 @@
 #include "MinHook.h"
 #pragma comment(lib, "ws2_32.lib")
 
-static const char *VERSION = "0.9";
+static const char *VERSION = "0.9.1";
+// ---- language: Russian for ru/uk/be/kk Windows, English otherwise; EDFStats.ini Language=auto|ru|en overrides
+static bool g_en = false;
+static inline const char *L_(const char *ru, const char *en) { return g_en ? en : ru; }
+static void PickLanguage(const std::string &setting) {
+    if (setting == "ru") { g_en = false; return; }
+    if (setting == "en") { g_en = true; return; }
+    WORD p = PRIMARYLANGID(GetUserDefaultUILanguage());
+    g_en = !(p == LANG_RUSSIAN || p == LANG_UKRAINIAN || p == LANG_BELARUSIAN || p == LANG_KAZAK);
+}
 static const char *SIG_APPLY_DAMAGE =
     "48 8B C4 48 89 58 18 55 56 57 41 54 41 55 41 56 41 57 48 8D A8 38 FF FF FF 48 81 EC 90 01 00 00 "
     "0F 29 70 B8 0F 29 78 A8 44 0F 29 40 98 44 0F 29 48 88 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 45 40 4C 8B EA 48";
@@ -116,18 +125,19 @@ static bool IsPart(const std::string &c) {
         if (c.find(k) != std::string::npos) return true;
     return false;
 }
-static std::string EnemyName(const std::string &c) {     // UTF-8
-    static const std::pair<const char *, const char *> names[] = {
-        { "GiantAnt", u8"Муравей" }, { "GiantSpider", u8"Паук" }, { "GiantBee", u8"Оса" }, { "GiantAntEgg", u8"Яйцо муравья" },
-        { "EDF6_Berserker_TypeA", u8"Берсеркер" }, { "EDF6_Berserker_Middle", u8"Берсеркер (средний)" },
-        { "EDF6_Berserker_Large", u8"Берсеркер (большой)" }, { "EDF6_Berserker_TypeBommer", u8"Берсеркер-бомбардир" },
-        { "EDF6_Berserker_TypeGrapple", u8"Берсеркер с тросом" },
-        { "EDF6_Berserker_Equipment_RocketPunch", u8"Ракетный кулак берсеркера" },
-        { "EDF6_Berserker_Equipment_Bomb", u8"Бомба берсеркера" }, { "EDF6_Berserker_Equipment_GrappleWire", u8"Трос берсеркера" },
-        { "DragonSmall", u8"Дракон" }, { "HumanoidBase", u8"Колонист" }, { "Humanoid_BigGreyBoss", u8"Большой серый" },
-        { "AntHill", u8"Муравейник" }, { "BigNest", u8"Гнездо" },
+static std::string EnemyName(const std::string &c) {     // class name -> UTF-8 name in the interface language
+    static const struct { const char *cls, *ru, *en; } names[] = {
+        { "GiantAnt", u8"Муравей", "Ant" }, { "GiantSpider", u8"Паук", "Spider" }, { "GiantBee", u8"Оса", "Wasp" },
+        { "GiantAntEgg", u8"Яйцо муравья", "Ant egg" },
+        { "EDF6_Berserker_TypeA", u8"Берсеркер", "Berserker" }, { "EDF6_Berserker_Middle", u8"Берсеркер (средний)", "Berserker (medium)" },
+        { "EDF6_Berserker_Large", u8"Берсеркер (большой)", "Berserker (large)" }, { "EDF6_Berserker_TypeBommer", u8"Берсеркер-бомбардир", "Berserker bomber" },
+        { "EDF6_Berserker_TypeGrapple", u8"Берсеркер с тросом", "Grappling Berserker" },
+        { "EDF6_Berserker_Equipment_RocketPunch", u8"Ракетный кулак берсеркера", "Berserker rocket fist" },
+        { "EDF6_Berserker_Equipment_Bomb", u8"Бомба берсеркера", "Berserker bomb" }, { "EDF6_Berserker_Equipment_GrappleWire", u8"Трос берсеркера", "Berserker grapple wire" },
+        { "DragonSmall", u8"Дракон", "Dragon" }, { "HumanoidBase", u8"Колонист", "Colonist" }, { "Humanoid_BigGreyBoss", u8"Большой серый", "Big grey" },
+        { "AntHill", u8"Муравейник", "Ant hill" }, { "BigNest", u8"Гнездо", "Nest" },
     };
-    for (auto &n : names) if (c == n.first) return n.second;
+    for (auto &n : names) if (c == n.cls) return L_(n.ru, n.en);
     return c.compare(0, 5, "EDF6_") == 0 ? c.substr(5) : c;
 }
 
@@ -212,7 +222,7 @@ struct Summary {
 struct Packet { uint32_t magic, version, sender, seq, mission; Summary s; };
 #pragma pack(pop)
 static const uint32_t MAGIC = 0x31534445;   // "EDS1"
-static const uint32_t PROTO = 9;
+static const uint32_t PROTO = 10;   // 10: enemy rows carry class names
 
 static std::string g_name;                  // UTF-8
 static void CopyStr(char *dst, size_t n, const std::string &s) {
@@ -636,15 +646,15 @@ static void OnHit(uint8_t *self, uint8_t *info, float hp0, float hp1, bool dead0
             else if (fr) { p.ffNpc += delta; if (killed) ++p.ffKills; }     // allied NPC soldier / NPC vehicle
             else {
                 ++p.hits; p.dmg += delta; p.best = std::max(p.best, (double)delta); p.dps.Add(now, delta);
-                p.dmgBy[EnemyName(tc.name)] += delta;
+                p.dmgBy[tc.name] += delta;
                 if (viaVeh) p.dmgVeh += delta;
                 if (killed && IsPart(tc.name)) ++p.parts;
-                else if (killed) { ++p.kills; ++p.killsBy[EnemyName(tc.name)]; if (viaVeh) ++p.killsVeh; }
+                else if (killed) { ++p.kills; ++p.killsBy[tc.name]; if (viaVeh) ++p.killsVeh; }
             }
         } else if (delta < 0) {
             if (self == who) p.healSelf += -delta; else p.heal += -delta;
         } else if (killed && !fr && delta == 0) {          // kill whose HP change happened on another machine
-            if (IsPart(tc.name)) ++p.parts; else { ++p.kills; ++p.killsBy[EnemyName(tc.name)]; }
+            if (IsPart(tc.name)) ++p.parts; else { ++p.kills; ++p.killsBy[tc.name]; }
         }
     }
     if (victim && delta > 0) {
@@ -732,7 +742,7 @@ static void WriteJson(const std::string &path, const std::vector<Row> &rows, con
                 s.ffKills, s.selfDmg, s.takenFF, s.taken,
                 s.takenVeh, s.deaths, s.heal, s.healSelf, s.dist, s.distVeh, s.revives, s.revived, s.downSecs);
         for (int e = 0; e < s.nEnemy; ++e)
-            fprintf(f, "%s{\"enemy\": \"%s\", \"damage\": %.1f, \"kills\": %u}", e ? ", " : "", Esc(s.enemy[e].name, false).c_str(),
+            fprintf(f, "%s{\"enemy\": \"%s\", \"class\": \"%s\", \"damage\": %.1f, \"kills\": %u}", e ? ", " : "", Esc(EnemyName(s.enemy[e].name), false).c_str(), Esc(s.enemy[e].name, false).c_str(),
                     s.enemy[e].dmg, s.enemy[e].kills);
         fprintf(f, "]}%s\n", i + 1 < rows.size() ? "," : "");
     }
@@ -749,8 +759,8 @@ static void WriteHtml(const std::string &path, const std::vector<Row> &rows, dou
     auto nm = [&](const Row &r) { std::string n = r.s.name[0] ? r.s.name : r.s.cls; return Esc(n, true); };
     double top = 1; for (auto &r : rows) top = std::max(top, (double)r.s.dmg);
 
-    fputs(u8R"(<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>EDF6 — итоги миссии</title><style>
+    std::string head = u8R"(<!doctype html><html lang="{LANG}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{TITLE}</title><style>
 :root{--bg:#0d1210;--panel:#151d19;--line:#24312b;--text:#e7efe9;--dim:#8fa398;--acc:#e2b93b;--acc2:#5fd18b;--bad:#e06a55}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 "Segoe UI",system-ui,sans-serif;padding:24px 16px}
 main{max-width:1100px;margin:0 auto}h1{font-size:26px;margin:0 0 4px;letter-spacing:.04em;text-transform:uppercase}
@@ -767,27 +777,30 @@ tr:last-child td{border-bottom:0}.me td:first-child{color:var(--acc2)}.cls{color
 .card{background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:12px 14px}.card h3{margin:0 0 8px;font-size:16px}
 .card table{min-width:0}.card td,.card th{padding:4px 6px}.card td:first-child{white-space:normal}.note{color:var(--dim);font-size:13px;margin-top:22px}.warn{color:var(--bad)}
 </style></head><body><main>
-)", f);
-    fprintf(f, u8"<h1>Итоги миссии <b>EDF6</b></h1><div class=\"sub\">%s · длительность %d:%02d · игроков: %zu</div>\n",
+)";
+    head.replace(head.find("{LANG}"), 6, g_en ? "en" : "ru");
+    head.replace(head.find("{TITLE}"), 7, L_(u8"EDF6 — итоги миссии", u8"EDF6 — mission results"));
+    fputs(head.c_str(), f);
+    fprintf(f, L_(u8"<h1>Итоги миссии <b>EDF6</b></h1><div class=\"sub\">%s · длительность %d:%02d · игроков: %zu</div>\n", u8"<h1>Mission results <b>EDF6</b></h1><div class=\"sub\">%s · duration %d:%02d · players: %zu</div>\n"),
             when, (int)secs / 60, (int)secs % 60, rows.size());
 
     // awards
     struct Aw { const char *title; double (*val)(const Summary &); const char *unit; };
     static const Aw aws[] = {
-        { u8"MVP — больше всего урона", [](const Summary &s) { return (double)s.dmg; }, "" },
-        { u8"Палач — больше всего убийств", [](const Summary &s) { return (double)s.kills; }, "" },
-        { u8"Пиковая мощь — урон за 1 с", [](const Summary &s) { return (double)s.peak1; }, "" },
-        { u8"Самый сильный удар", [](const Summary &s) { return (double)s.best; }, "" },
-        { u8"Спасатель — поднял союзников", [](const Summary &s) { return (double)s.revives; }, "" },
-        { u8"Медик — лечение союзников", [](const Summary &s) { return (double)s.heal; }, "" },
-        { u8"Стена — принял урона от врагов", [](const Summary &s) { return (double)(s.taken + s.takenVeh); }, "" },
-        { u8"Турист — прошёл пешком", [](const Summary &s) { return (double)s.dist; }, u8" м" },
-        { u8"Водитель — урон с техники", [](const Summary &s) { return (double)s.dmgVeh; }, "" },
-        { u8"Предатель — урон по игрокам", [](const Summary &s) { return (double)s.ffPlayers; }, "" },
-        { u8"Гроза NPC — урон по союзным NPC", [](const Summary &s) { return (double)s.ffNpc; }, "" },
-        { u8"Сапёр — урон по себе", [](const Summary &s) { return (double)s.selfDmg; }, "" },
+        { L_(u8"MVP — больше всего урона", u8"MVP — most damage"), [](const Summary &s) { return (double)s.dmg; }, "" },
+        { L_(u8"Палач — больше всего убийств", u8"Executioner — most kills"), [](const Summary &s) { return (double)s.kills; }, "" },
+        { L_(u8"Пиковая мощь — урон за 1 с", u8"Peak power — damage in 1 s"), [](const Summary &s) { return (double)s.peak1; }, "" },
+        { L_(u8"Самый сильный удар", u8"Biggest hit"), [](const Summary &s) { return (double)s.best; }, "" },
+        { L_(u8"Спасатель — поднял союзников", u8"Lifesaver — rescued allies"), [](const Summary &s) { return (double)s.revives; }, "" },
+        { L_(u8"Медик — лечение союзников", u8"Medic — healed allies"), [](const Summary &s) { return (double)s.heal; }, "" },
+        { L_(u8"Стена — принял урона от врагов", u8"Wall — damage taken from enemies"), [](const Summary &s) { return (double)(s.taken + s.takenVeh); }, "" },
+        { L_(u8"Турист — прошёл пешком", u8"Tourist — distance on foot"), [](const Summary &s) { return (double)s.dist; }, L_(u8" м", u8" m") },
+        { L_(u8"Водитель — урон с техники", u8"Driver — damage from vehicles"), [](const Summary &s) { return (double)s.dmgVeh; }, "" },
+        { L_(u8"Предатель — урон по игрокам", u8"Traitor — damage to players"), [](const Summary &s) { return (double)s.ffPlayers; }, "" },
+        { L_(u8"Гроза NPC — урон по союзным NPC", u8"NPC menace — damage to allied NPCs"), [](const Summary &s) { return (double)s.ffNpc; }, "" },
+        { L_(u8"Сапёр — урон по себе", u8"Sapper — damage to yourself"), [](const Summary &s) { return (double)s.selfDmg; }, "" },
     };
-    fputs(u8"<h2>Награды</h2><div class=\"awards\">\n", f);
+    fputs(L_(u8"<h2>Награды</h2><div class=\"awards\">\n", u8"<h2>Awards</h2><div class=\"awards\">\n"), f);
     for (auto &a : aws) {
         int bi = -1; double bv = 0;
         for (size_t i = 0; i < rows.size(); ++i) {
@@ -802,16 +815,16 @@ tr:last-child td{border-bottom:0}.me td:first-child{color:var(--acc2)}.cls{color
     fputs("</div>\n", f);
 
     // main table
-    fputs(u8"<h2>Таблица</h2><div class=\"wrap\"><table><tr><th>Игрок</th><th>Урон</th><th>Пик DPS 1с / 5с</th><th>Убийства</th>"
-          u8"<th>Части</th><th>Лучший удар</th><th>Получил: враги / свои</th><th>Смерти</th><th>Поднял / подняли</th><th>Лечение</th>"
-          u8"<th>По игрокам</th><th>По NPC</th><th>Себе</th><th>Пешком</th><th>На технике</th></tr>\n", f);
+    fputs(L_(u8"<h2>Таблица</h2><div class=\"wrap\"><table><tr><th>Игрок</th><th>Урон</th><th>Пик DPS 1с / 5с</th><th>Убийства</th>", u8"<h2>Scoreboard</h2><div class=\"wrap\"><table><tr><th>Player</th><th>Damage</th><th>Peak DPS 1s / 5s</th><th>Kills</th>"), f);
+    fputs(L_(u8"<th>Части</th><th>Лучший удар</th><th>Получил: враги / свои</th><th>Смерти</th><th>Поднял / подняли</th><th>Лечение</th>", u8"<th>Parts</th><th>Best hit</th><th>Taken: enemies / allies</th><th>Deaths</th><th>Rescued / was rescued</th><th>Healing</th>"), f);
+    fputs(L_(u8"<th>По игрокам</th><th>По NPC</th><th>Себе</th><th>Пешком</th><th>На технике</th></tr>\n", u8"<th>To players</th><th>To NPCs</th><th>To self</th><th>On foot</th><th>In vehicles</th></tr>\n"), f);
     for (auto &r : rows) {
         const Summary &s = r.s;
         fprintf(f, "<tr%s><td>%s <span class=\"cls\">%s%s</span><div class=\"bar\"><i style=\"width:%.1f%%\"></i></div></td>",
                 r.local ? " class=\"me\"" : "", nm(r).c_str(), Esc(s.cls, true).c_str(),
-                r.partial ? u8" · неполные данные" : "", 100.0 * s.dmg / top);
-        fprintf(f, "<td>%s</td><td>%s / %s</td><td>%u</td><td>%u</td><td>%s</td><td>%s / %s</td><td>%u</td><td>%u / %u</td><td>%s</td>"
-                   u8"<td>%s</td><td>%s</td><td>%s</td><td>%s м</td><td>%s м</td></tr>\n",
+                r.partial ? L_(u8" · неполные данные", u8" · partial data") : "", 100.0 * s.dmg / top);
+        std::string rowFmt = std::string("<td>%s</td><td>%s / %s</td><td>%u</td><td>%u</td><td>%s</td><td>%s / %s</td><td>%u</td><td>%u / %u</td><td>%s</td>") + L_(u8"<td>%s</td><td>%s</td><td>%s</td><td>%s м</td><td>%s м</td></tr>\n", u8"<td>%s</td><td>%s</td><td>%s</td><td>%s m</td><td>%s m</td></tr>\n");
+        fprintf(f, rowFmt.c_str(),
                 Num(s.dmg).c_str(), Num(s.peak1).c_str(), Num(s.peak5).c_str(), s.kills, s.parts, Num(s.best).c_str(),
                 Num(s.taken + s.takenVeh).c_str(), Num(s.takenFF).c_str(), s.deaths, s.revives, s.revived, Num(s.heal).c_str(), Num(s.ffPlayers).c_str(),
                 Num(s.ffNpc).c_str(), Num(s.selfDmg).c_str(), Num(s.dist).c_str(), Num(s.distVeh).c_str());
@@ -819,26 +832,26 @@ tr:last-child td{border-bottom:0}.me td:first-child{color:var(--acc2)}.cls{color
     fputs("</table></div>\n", f);
 
     // per player breakdown
-    fputs(u8"<h2>По врагам</h2><div class=\"cards\">\n", f);
+    fputs(L_(u8"<h2>По врагам</h2><div class=\"cards\">\n", u8"<h2>By enemy</h2><div class=\"cards\">\n"), f);
     for (auto &r : rows) {
         const Summary &s = r.s;
-        fprintf(f, "<div class=\"card\"><h3>%s <span class=\"cls\">%s</span></h3><table><tr><th>Враг</th><th>Урон</th><th>Убийства</th></tr>",
-                nm(r).c_str(), Esc(s.cls, true).c_str());
+        fprintf(f, "<div class=\"card\"><h3>%s <span class=\"cls\">%s</span></h3><table><tr>%s</tr>",
+                nm(r).c_str(), Esc(s.cls, true).c_str(), L_(u8"<th>Враг</th><th>Урон</th><th>Убийства</th>", u8"<th>Enemy</th><th>Damage</th><th>Kills</th>"));
         for (int e = 0; e < s.nEnemy; ++e)
-            fprintf(f, "<tr><td>%s</td><td>%s</td><td>%u</td></tr>", Esc(s.enemy[e].name, true).c_str(), Num(s.enemy[e].dmg).c_str(), s.enemy[e].kills);
-        if (!s.nEnemy) fputs(u8"<tr><td colspan=3 class=\"cls\">нет данных</td></tr>", f);
-        if (s.dmgVeh > 0) fprintf(f, u8"<tr><td class=\"cls\">из них с техники</td><td>%s</td><td>%u</td></tr>", Num(s.dmgVeh).c_str(), s.killsVeh);
-        if (s.ffNpc > 0 || s.ffKills) fprintf(f, u8"<tr><td class=\"cls\">союзные NPC</td><td>%s</td><td>%u</td></tr>", Num(s.ffNpc).c_str(), s.ffKills);
+            fprintf(f, "<tr><td>%s</td><td>%s</td><td>%u</td></tr>", Esc(EnemyName(s.enemy[e].name), true).c_str(), Num(s.enemy[e].dmg).c_str(), s.enemy[e].kills);
+        if (!s.nEnemy) fputs(L_(u8"<tr><td colspan=3 class=\"cls\">нет данных</td></tr>", u8"<tr><td colspan=3 class=\"cls\">no data</td></tr>"), f);
+        if (s.dmgVeh > 0) fprintf(f, L_(u8"<tr><td class=\"cls\">из них с техники</td><td>%s</td><td>%u</td></tr>", u8"<tr><td class=\"cls\">of that from vehicles</td><td>%s</td><td>%u</td></tr>"), Num(s.dmgVeh).c_str(), s.killsVeh);
+        if (s.ffNpc > 0 || s.ffKills) fprintf(f, L_(u8"<tr><td class=\"cls\">союзные NPC</td><td>%s</td><td>%u</td></tr>", u8"<tr><td class=\"cls\">allied NPCs</td><td>%s</td><td>%u</td></tr>"), Num(s.ffNpc).c_str(), s.ffKills);
         for (int i = 0; i < s.nFfFrom; ++i)
-            fprintf(f, u8"<tr><td class=\"cls\">получил от игрока-%s</td><td>%s</td><td></td></tr>", Esc(s.ffFrom[i].cls, true).c_str(), Num(s.ffFrom[i].dmg).c_str());
+            fprintf(f, L_(u8"<tr><td class=\"cls\">получил от игрока-%s</td><td>%s</td><td></td></tr>", u8"<tr><td class=\"cls\">taken from the %s player</td><td>%s</td><td></td></tr>"), Esc(s.ffFrom[i].cls, true).c_str(), Num(s.ffFrom[i].dmg).c_str());
         fputs("</table></div>\n", f);
     }
     fputs("</div>\n", f);
     bool anyPartial = false; for (auto &r : rows) anyPartial |= r.partial;
     if (anyPartial)
-        fputs(u8"<p class=\"note warn\">«Неполные данные» — у этого игрока не стоит EDFStats или его статистика не дошла по сети; "
-              u8"видно только то, что заметил этот компьютер (в основном добивания).</p>\n", f);
-    fprintf(f, u8"<p class=\"note\">EDFStats %s · урон считает компьютер стрелявшего игрока, остальные получают его цифры по сети.</p>\n", VERSION);
+    { fputs(L_(u8"<p class=\"note warn\">«Неполные данные» — у этого игрока не стоит EDFStats или его статистика не дошла по сети; ", u8"<p class=\"note warn\">“Partial data” — this player does not run EDFStats or their numbers did not arrive over the network; "), f);
+          fputs(L_(u8"видно только то, что заметил этот компьютер (в основном добивания).</p>\n", u8"only what this PC saw is shown (mostly finishing blows).</p>\n"), f); }
+    fprintf(f, L_(u8"<p class=\"note\">EDFStats %s · урон считает компьютер стрелявшего игрока, остальные получают его цифры по сети.</p>\n", u8"<p class=\"note\">EDFStats %s · damage is counted by the shooter\'s PC, the others get those numbers over the network.</p>\n"), VERSION);
     fputs("</main></body></html>\n", f);
     fclose(f);
 }
@@ -891,7 +904,7 @@ static void WriteResults(const char *why) {      // caller holds g_cs
             s.killsVeh, s.parts, s.best, s.peak1, s.peak5, s.ffPlayers, s.ffNpc, s.ffKills, s.selfDmg, s.taken, s.takenVeh,
             s.takenFF, s.deaths, s.heal, s.healSelf, s.dist, s.distVeh, s.revives, s.revived, s.downSecs);
         for (int i = 0; i < s.nFfFrom; ++i) Log("      friendly fire received from %s: %.0f", s.ffFrom[i].cls, s.ffFrom[i].dmg);
-        for (int e = 0; e < s.nEnemy; ++e) Log("      %-40s dmg %8.0f  kills %u", s.enemy[e].name, s.enemy[e].dmg, s.enemy[e].kills);
+        for (int e = 0; e < s.nEnemy; ++e) Log("      %-40s dmg %8.0f  kills %u", EnemyName(s.enemy[e].name).c_str(), s.enemy[e].dmg, s.enemy[e].kills);
     }
     Log("==== END ==== (packets: EOS sent %u received %u, UDP sent %u received %u)", g_txEos, g_rxEos, g_txUdp, g_rxUdp);
 
@@ -985,7 +998,7 @@ static std::string IniUtf8(const char *ini, const char *key) {
 extern "C" __declspec(dllexport) bool EDFMLAPI EML6_Load(PluginInfo *info) {
     info->infoVersion = PluginInfo::MaxInfoVer;
     info->name = "EDFStats";
-    info->version = PLUG_VER(0, 9, 0, 0);
+    info->version = PLUG_VER(0, 9, 1, 0);
 
     InitializeCriticalSection(&g_cs); InitializeCriticalSection(&g_viewCs);
     char base[MAX_PATH]; HMODULE me = nullptr;
@@ -1003,6 +1016,7 @@ extern "C" __declspec(dllexport) bool EDFMLAPI EML6_Load(PluginInfo *info) {
     g_port = GetPrivateProfileIntA("EDFStats", "Port", 27787, ini);
     g_sendMs = std::max(250, (int)GetPrivateProfileIntA("EDFStats", "SendIntervalMs", 1000, ini));
     g_name = IniUtf8(ini, "Name");
+    PickLanguage(IniUtf8(ini, "Language"));
     g_overlayOn = GetPrivateProfileIntA("EDFStats", "Overlay", 1, ini);
     g_uiUser = std::min(3.0f, std::max(0.5f, GetPrivateProfileIntA("EDFStats", "OverlayScale", 100, ini) / 100.0f));
     g_keyLive = GetPrivateProfileIntA("EDFStats", "LivePanelKey", VK_F6, ini);

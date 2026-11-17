@@ -97,12 +97,12 @@ static void DrawLive(const LiveView &v) {
     const Row *me = nullptr; for (auto &r : v.rows) if (r.local) me = &r;
     if (me) {
         ImGui::PushFont(Bold()); ImGui::TextColored(GOLD, "%s", NumSp(me->s.dmg).c_str()); ImGui::PopFont();
-        ImGui::SameLine(); ImGui::TextColored(DIM, u8"урон");
-        ImGui::Text(u8"DPS  %s", NumSp(v.dps1).c_str()); ImGui::SameLine(); ImGui::TextColored(DIM, u8"(5 с: %s)", NumSp(v.dps5).c_str());
-        ImGui::TextColored(DIM, u8"пик %s", NumSp(me->s.peak1).c_str());
-        ImGui::Text(u8"Убийства %u", me->s.kills);
-        if (me->s.parts) { ImGui::SameLine(); ImGui::TextColored(DIM, u8"  частей %u", me->s.parts); }
-    } else ImGui::TextColored(DIM, u8"EDFStats: ждёт начала боя");
+        ImGui::SameLine(); ImGui::TextColored(DIM, L_(u8"урон", u8"damage"));
+        ImGui::Text(u8"DPS  %s", NumSp(v.dps1).c_str()); ImGui::SameLine(); ImGui::TextColored(DIM, L_(u8"(5 с: %s)", u8"(5 s: %s)"), NumSp(v.dps5).c_str());
+        ImGui::TextColored(DIM, L_(u8"пик %s", u8"peak %s"), NumSp(me->s.peak1).c_str());
+        ImGui::Text(L_(u8"Убийства %u", u8"Kills %u"), me->s.kills);
+        if (me->s.parts) { ImGui::SameLine(); ImGui::TextColored(DIM, L_(u8"  частей %u", u8"  parts %u"), me->s.parts); }
+    } else ImGui::TextColored(DIM, L_(u8"EDFStats: ждёт начала боя", u8"EDFStats: waiting for the fight"));
     if (v.rows.size() > 1) {
         ImGui::Separator();
         double top = 1; for (auto &r : v.rows) top = std::max(top, (double)r.s.dmg);
@@ -125,22 +125,22 @@ static void DrawBoard(const LiveView &v) {
     ImGui::Begin("##board", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs |
                  ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoSavedSettings);
     ImGui::PushFont(Bold());
-    ImGui::TextColored(GOLD, v.ended ? u8"ИТОГИ МИССИИ" : u8"СТАТИСТИКА МИССИИ");
+    ImGui::TextColored(GOLD, v.ended ? L_(u8"ИТОГИ МИССИИ", u8"MISSION RESULTS") : L_(u8"СТАТИСТИКА МИССИИ", u8"MISSION STATS"));
     ImGui::PopFont();
-    ImGui::SameLine(); ImGui::TextColored(DIM, u8"  %d:%02d  ·  F7 — скрыть", (int)v.secs / 60, (int)v.secs % 60);
-    if (v.rows.empty()) { ImGui::TextColored(DIM, u8"Пока нет данных."); ImGui::End(); return; }
+    ImGui::SameLine(); ImGui::TextColored(DIM, L_(u8"  %d:%02d  ·  F7 — скрыть", u8"  %d:%02d  ·  F7 — hide"), (int)v.secs / 60, (int)v.secs % 60);
+    if (v.rows.empty()) { ImGui::TextColored(DIM, L_(u8"Пока нет данных.", u8"No data yet.")); ImGui::End(); return; }
 
     // awards (the same ones as in the HTML report, short form)
     struct Aw { const char *t; double (*f)(const Summary &); };
     static const Aw aws[] = {
         { "MVP", [](const Summary &s) { return (double)s.dmg; } },
-        { u8"Палач", [](const Summary &s) { return (double)s.kills; } },
-        { u8"Пиковая мощь", [](const Summary &s) { return (double)s.peak1; } },
-        { u8"Спасатель", [](const Summary &s) { return (double)s.revives; } },
-        { u8"Медик", [](const Summary &s) { return (double)s.heal; } },
-        { u8"Стена", [](const Summary &s) { return (double)(s.taken + s.takenVeh); } },
-        { u8"Турист", [](const Summary &s) { return (double)s.dist; } },
-        { u8"Предатель", [](const Summary &s) { return (double)s.ffPlayers; } },
+        { L_(u8"Палач", u8"Executioner"), [](const Summary &s) { return (double)s.kills; } },
+        { L_(u8"Пиковая мощь", u8"Peak power"), [](const Summary &s) { return (double)s.peak1; } },
+        { L_(u8"Спасатель", u8"Lifesaver"), [](const Summary &s) { return (double)s.revives; } },
+        { L_(u8"Медик", u8"Medic"), [](const Summary &s) { return (double)s.heal; } },
+        { L_(u8"Стена", u8"Wall"), [](const Summary &s) { return (double)(s.taken + s.takenVeh); } },
+        { L_(u8"Турист", u8"Tourist"), [](const Summary &s) { return (double)s.dist; } },
+        { L_(u8"Предатель", u8"Traitor"), [](const Summary &s) { return (double)s.ffPlayers; } },
     };
     bool first = true;
     for (auto &a : aws) {
@@ -153,8 +153,8 @@ static void DrawBoard(const LiveView &v) {
     }
     ImGui::Spacing();
 
-    static const char *cols[] = { u8"Игрок", u8"Урон", u8"Пик DPS", u8"Убийства", u8"Части", u8"Лучший", u8"Получил",
-                                  u8"Смерти", u8"Поднял", u8"Лечение", u8"По игрокам", u8"По NPC", u8"Себе", u8"Пешком", u8"Техника" };
+    static const char *cols[] = { L_(u8"Игрок", u8"Player"), L_(u8"Урон", u8"Damage"), L_(u8"Пик DPS", u8"Peak DPS"), L_(u8"Убийства", u8"Kills"), L_(u8"Части", u8"Parts"), L_(u8"Лучший", u8"Best"), L_(u8"Получил", u8"Taken"),
+                                  L_(u8"Смерти", u8"Deaths"), L_(u8"Поднял", u8"Rescues"), L_(u8"Лечение", u8"Healing"), L_(u8"По игрокам", u8"To players"), L_(u8"По NPC", u8"To NPCs"), L_(u8"Себе", u8"To self"), L_(u8"Пешком", u8"On foot"), L_(u8"Техника", u8"Vehicles") };
     const int nc = sizeof cols / sizeof cols[0];
     if (ImGui::BeginTable("t", nc, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingFixedFit)) {
         for (int i = 0; i < nc; ++i) ImGui::TableSetupColumn(cols[i]);
@@ -164,17 +164,17 @@ static void DrawBoard(const LiveView &v) {
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
             ImGui::TextColored(r.local ? GREEN : ImVec4(0.91f, 0.94f, 0.91f, 1), "%s", RowName(r));
-            ImGui::SameLine(); ImGui::TextColored(DIM, "%s%s", s.cls, r.partial ? u8" · неполн." : "");
+            ImGui::SameLine(); ImGui::TextColored(DIM, "%s%s", s.cls, r.partial ? L_(u8" · неполн.", u8" · partial") : "");
             auto num = [](double x) { ImGui::TableNextColumn(); ImGui::Text("%s", NumSp(x).c_str()); };
             num(s.dmg); num(s.peak1); num(s.kills); num(s.parts); num(s.best); num(s.taken + s.takenVeh); num(s.deaths); num(s.revives); num(s.heal);
             ImGui::TableNextColumn(); if (s.ffPlayers > 0) ImGui::TextColored(RED, "%s", NumSp(s.ffPlayers).c_str()); else ImGui::Text("0");
             num(s.ffNpc); num(s.selfDmg);
-            ImGui::TableNextColumn(); ImGui::Text(u8"%s м", NumSp(s.dist).c_str());
-            ImGui::TableNextColumn(); ImGui::Text(u8"%s м", NumSp(s.distVeh).c_str());
+            ImGui::TableNextColumn(); ImGui::Text(L_(u8"%s м", u8"%s m"), NumSp(s.dist).c_str());
+            ImGui::TableNextColumn(); ImGui::Text(L_(u8"%s м", u8"%s m"), NumSp(s.distVeh).c_str());
         }
         ImGui::EndTable();
     }
-    if (v.ended && !v.savedPath.empty()) ImGui::TextColored(DIM, u8"Отчёт: Mods\\Plugins\\EDFStats\\latest.html");
+    if (v.ended && !v.savedPath.empty()) ImGui::TextColored(DIM, L_(u8"Отчёт: Mods\\Plugins\\EDFStats\\latest.html", u8"Report: Mods\\Plugins\\EDFStats\\latest.html"));
     ImGui::End();
 }
 
