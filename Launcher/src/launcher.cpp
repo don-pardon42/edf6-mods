@@ -38,7 +38,17 @@
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
 
-static const char *LAUNCHER_VERSION = "0.2";
+// ---- language: Russian for ru/uk/be/kk Windows, English for everything else; EDF6Launcher.ini Language= overrides
+static bool g_en = false;
+static inline const char *L_(const char *ru, const char *en) { return g_en ? en : ru; }
+static void PickLanguage(const std::string &setting) {
+    if (setting == "ru") { g_en = false; return; }
+    if (setting == "en") { g_en = true; return; }
+    WORD p = PRIMARYLANGID(GetUserDefaultUILanguage());
+    g_en = !(p == LANG_RUSSIAN || p == LANG_UKRAINIAN || p == LANG_BELARUSIAN || p == LANG_KAZAK);
+}
+
+static const char *LAUNCHER_VERSION = "0.3";
 static const char *DEFAULT_MANIFEST = "https://raw.githubusercontent.com/don-pardon42/edf6-mods/main/mods.json";
 
 // ---- small helpers ------------------------------------------------------------------------------
@@ -253,7 +263,7 @@ static int MergeIni(const std::string &userPath, const std::string &defaults) {
 // ---- state ---------------------------------------------------------------------------------------------
 struct ModFile { std::string name, kind, url, sha; };
 struct Mod {
-    std::string id, version, description, log, report; std::vector<ModFile> files;   // from mods.json
+    std::string id, version, description, descriptionEn, log, report; std::vector<ModFile> files;   // from mods.json
     bool inManifest = false;
     std::string installed;        // version from the lock file, "?" = DLL present but not installed by the launcher
     bool present = false, enabled = false;
@@ -261,11 +271,12 @@ struct Mod {
 static std::string g_gameDir, g_plugins, g_disabled, g_lockPath, g_cfgPath, g_manifestSrc = DEFAULT_MANIFEST;
 static std::string g_gameExe = "EDF6.exe", g_gameArgs;
 static bool g_closeOnPlay = false;
+static std::string g_langArg;           // --lang ru|en from the command line
 static int g_theme = 0;                 // index into g_themes (UI section)
 static std::vector<Mod> g_mods;
 static std::string g_modloaderPage = "https://github.com/BlueAmulet/EDFModLoader/releases";
 static std::mutex g_mx;                                  // guards g_mods / g_status while a worker runs
-static std::string g_status = u8"Готово";
+static std::string g_status = L_(u8"Готово", u8"Ready");
 static std::atomic<bool> g_busy{ false };
 static bool g_manifestOk = false; static std::string g_manifestErr;
 static std::map<std::string, std::string> g_lock;       // id -> version installed by the launcher
@@ -317,7 +328,7 @@ static void LoadManifest() {
     if (ok && ParseJson(text, j)) {
         if (!j["modloader"]["page"].str().empty()) g_modloaderPage = j["modloader"]["page"].str();
         for (auto &e : j["mods"].a) {
-            Mod m; m.id = e["id"].str(); m.version = e["version"].str(); m.description = e["description"].str();
+            Mod m; m.id = e["id"].str(); m.version = e["version"].str(); m.description = e["description"].str(); m.descriptionEn = e["description_en"].str();
             m.log = e["log"].str(); m.report = e["report"].str(); m.inManifest = true;
             for (auto &f : e["files"].a) m.files.push_back({ f["name"].str(), f["kind"].str(), f["url"].str(), f["sha256"].str() });
             if (!m.id.empty()) list.push_back(m);
@@ -331,21 +342,21 @@ static void LoadManifest() {
         g_mods = keep;
     }
     ScanInstalled();
-    g_status = ok ? u8"Список модов обновлён" : u8"Нет связи с GitHub: " + err + u8" — показаны установленные моды";
+    g_status = ok ? L_(u8"Список модов обновлён", u8"Mod list updated") : L_(u8"Нет связи с GitHub: ", u8"No connection to GitHub: ") + err + L_(u8" — показаны установленные моды", u8" - showing installed mods");
 }
 
 // ---- operations (run on a worker thread) -----------------------------------------------------------------
 static bool GameRunning() { return ProcessRunning(W(g_gameExe.substr(g_gameExe.find_last_of("\\/") + 1)).c_str()) || ProcessRunning(L"EDF6.exe"); }
 static bool InstallMod(Mod m, std::string &msg) {
-    if (GameRunning()) { msg = u8"Закройте игру перед установкой"; return false; }
+    if (GameRunning()) { msg = L_(u8"Закройте игру перед установкой", u8"Close the game before installing"); return false; }
     CreateDirectoryW(W(g_gameDir + "\\Mods").c_str(), nullptr); CreateDirectoryW(W(g_plugins).c_str(), nullptr);
     std::map<std::string, std::string> data;
     for (auto &f : m.files) {
         if (f.url.empty()) continue;
-        Status(u8"Скачиваю " + f.name + "...");
+        Status(L_(u8"Скачиваю ", u8"Downloading ") + f.name + "...");
         std::string body, err;
         if (!HttpGet(f.url, body, err)) { msg = f.name + ": " + err; return false; }
-        if (!f.sha.empty() && Sha256Hex(body) != f.sha) { msg = f.name + u8": контрольная сумма не совпала, файл не установлен"; return false; }
+        if (!f.sha.empty() && Sha256Hex(body) != f.sha) { msg = f.name + L_(u8": контрольная сумма не совпала, файл не установлен", u8": checksum mismatch, file not installed"); return false; }
         data[f.name] = body;
     }
     bool disabled = m.present && !m.enabled;
@@ -356,7 +367,7 @@ static bool InstallMod(Mod m, std::string &msg) {
             std::string dir = disabled ? g_disabled : g_plugins, path = dir + "\\" + f.name;
             if (disabled) CreateDirectoryW(W(g_disabled).c_str(), nullptr);
             if (Exists(path)) CopyFileW(W(path).c_str(), W(path + ".bak").c_str(), FALSE);
-            if (!WriteFileAtomic(path, data[f.name])) { msg = f.name + u8": не удалось записать (файл занят?)"; return false; }
+            if (!WriteFileAtomic(path, data[f.name])) { msg = f.name + L_(u8": не удалось записать (файл занят?)", u8": cannot write the file (in use?)"); return false; }
         } else {
             std::string path = g_plugins + "\\" + f.name;
             if (!Exists(path)) WriteFileAtomic(path, data[f.name]);
@@ -364,7 +375,7 @@ static bool InstallMod(Mod m, std::string &msg) {
         }
     }
     { std::lock_guard<std::mutex> l(g_mx); g_lock[m.id] = m.version; SaveLock(); ScanInstalled(); }
-    msg = m.id + " " + m.version + u8" установлен" + (added ? u8", в настройки добавлено новых параметров: " + std::to_string(added) : "");
+    msg = m.id + " " + m.version + L_(u8" установлен", u8" installed") + (added ? L_(u8", в настройки добавлено новых параметров: ", u8", new settings added: ") + std::to_string(added) : "");
     return true;
 }
 static void RunWorker(std::function<void()> fn) {
@@ -372,20 +383,20 @@ static void RunWorker(std::function<void()> fn) {
     std::thread([fn] { fn(); g_busy = false; }).detach();
 }
 static bool SetEnabled(Mod &m, bool on, std::string &msg) {   // caller holds g_mx
-    if (GameRunning()) { msg = u8"Закройте игру, чтобы включать и выключать моды"; return false; }
+    if (GameRunning()) { msg = L_(u8"Закройте игру, чтобы включать и выключать моды", u8"Close the game to turn mods on or off"); return false; }
     std::string dll = DllOf(m), a = g_plugins + "\\" + dll, b = g_disabled + "\\" + dll;
     CreateDirectoryW(W(g_disabled).c_str(), nullptr);
     BOOL ok = on ? MoveFileExW(W(b).c_str(), W(a).c_str(), MOVEFILE_REPLACE_EXISTING) : MoveFileExW(W(a).c_str(), W(b).c_str(), MOVEFILE_REPLACE_EXISTING);
-    if (!ok) { msg = dll + u8": не удалось переместить"; return false; }
-    m.enabled = on; msg = m.id + (on ? u8" включён" : u8" выключен (DLL в Mods\\Plugins\\disabled)");
+    if (!ok) { msg = dll + L_(u8": не удалось переместить", u8": cannot move the file"); return false; }
+    m.enabled = on; msg = m.id + (on ? L_(u8" включён", u8" enabled") : L_(u8" выключен (DLL в Mods\\Plugins\\disabled)", u8" disabled (DLL moved to Mods\\Plugins\\disabled)"));
     return true;
 }
 static bool RemoveMod(Mod &m, std::string &msg) {             // caller holds g_mx; settings and logs are kept
-    if (GameRunning()) { msg = u8"Закройте игру перед удалением"; return false; }
+    if (GameRunning()) { msg = L_(u8"Закройте игру перед удалением", u8"Close the game before removing"); return false; }
     std::string dll = DllOf(m);
     DeleteFileW(W(g_plugins + "\\" + dll).c_str()); DeleteFileW(W(g_disabled + "\\" + dll).c_str());
     g_lock.erase(m.id); SaveLock(); ScanInstalled();
-    msg = m.id + u8" удалён (настройки и логи оставлены)";
+    msg = m.id + L_(u8" удалён (настройки и логи оставлены)", u8" removed (settings and logs kept)");
     return true;
 }
 static bool ModLoaderOk() { return Exists(g_gameDir + "\\winmm.dll") && Exists(g_gameDir + "\\EDFModLoader.dll"); }
@@ -394,9 +405,9 @@ static void Play() {
     std::wstring cmd = L"\"" + W(exe) + L"\" " + W(g_gameArgs);
     STARTUPINFOW si{ sizeof si }; PROCESS_INFORMATION pi{};
     if (CreateProcessW(nullptr, &cmd[0], nullptr, nullptr, FALSE, 0, nullptr, W(g_gameDir).c_str(), &si, &pi)) {
-        CloseHandle(pi.hThread); CloseHandle(pi.hProcess); Status(u8"Игра запущена");
+        CloseHandle(pi.hThread); CloseHandle(pi.hProcess); Status(L_(u8"Игра запущена", u8"Game started"));
         if (g_closeOnPlay) PostQuitMessage(0);
-    } else Status(u8"Не удалось запустить " + exe + " (" + std::to_string(GetLastError()) + ")");
+    } else Status(L_(u8"Не удалось запустить ", u8"Cannot start ") + exe + " (" + std::to_string(GetLastError()) + ")");
 }
 
 // ---- launcher settings (EDF6Launcher.ini next to the exe) -------------------------------------------------
@@ -406,7 +417,7 @@ static void LoadConfig() {
         WriteFileAtomic(g_cfgPath, "[Launcher]\r\n; game folder; empty = the folder of EDF6Launcher.exe\r\nGameDir=\r\n"
                                    "; program started by the Play button (relative to the game folder) and its arguments\r\nGameExe=EDF6.exe\r\nGameArgs=\r\n"
                                    "; 1 = close the launcher after starting the game\r\nCloseOnPlay=0\r\n"
-                                   "; where the mod list comes from\r\nManifest=" + std::string(DEFAULT_MANIFEST) + "\r\n");
+                                   "; where the mod list comes from\r\nManifest=" + std::string(DEFAULT_MANIFEST) + "\r\n" "; interface language: auto (from Windows), ru, en\r\nLanguage=auto\r\n");
     auto get = [&](const wchar_t *k, const char *def) {
         wchar_t b[1024]; GetPrivateProfileStringW(L"Launcher", k, W(def).c_str(), b, 1024, W(g_cfgPath).c_str()); return U(b);
     };
@@ -414,6 +425,7 @@ static void LoadConfig() {
     if (g_gameDir.empty()) g_gameDir = ExeDir();
     g_gameExe = get(L"GameExe", "EDF6.exe"); g_gameArgs = get(L"GameArgs", "");
     g_closeOnPlay = get(L"CloseOnPlay", "0") == "1";
+    PickLanguage(g_langArg.empty() ? get(L"Language", "auto") : g_langArg);
     g_plugins = g_gameDir + "\\Mods\\Plugins"; g_disabled = g_plugins + "\\disabled"; g_lockPath = g_plugins + "\\edf6mods.lock.json";
 }
 
@@ -648,7 +660,7 @@ static void DrawIniEditor() {
     ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowFocus();
     bool open = true;
-    std::string title = u8"Настройки: " + g_editTitle + (g_edit->dirty ? " *" : "") + "###ini";
+    std::string title = L_(u8"Настройки: ", u8"Settings: ") + g_editTitle + (g_edit->dirty ? " *" : "") + "###ini";
     if (ImGui::Begin(title.c_str(), &open, ImGuiWindowFlags_NoCollapse)) {
         ImGui::TextColored(T.dim, "%s", g_edit->path.c_str());
         ImGui::BeginChild("lines", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() * 1.4f), true);
@@ -666,7 +678,7 @@ static void DrawIniEditor() {
                     if (ImGui::Checkbox("##b", &b)) { L.value = b ? "1" : "0"; g_edit->dirty = true; }
                 } else if (IsKeyLine(L) && (L.value.rfind("0x", 0) == 0 || L.value.empty())) {
                     int vk = (int)strtol(L.value.c_str(), nullptr, 0);
-                    std::string label = g_captureLine == i ? u8"нажмите клавишу... (Esc — отмена)" : (vk ? KeyName(vk) + "  (" + L.value + ")" : u8"не задана");
+                    std::string label = g_captureLine == i ? L_(u8"нажмите клавишу... (Esc — отмена)", u8"press a key... (Esc - cancel)") : (vk ? KeyName(vk) + "  (" + L.value + ")" : L_(u8"не задана", u8"not set"));
                     if (ImGui::Button(label.c_str(), ImVec2(260, 0))) g_captureLine = i;
                 } else {
                     char buf[512]; strncpy(buf, L.value.c_str(), sizeof buf - 1); buf[sizeof buf - 1] = 0;
@@ -679,10 +691,10 @@ static void DrawIniEditor() {
             ImGui::EndTable();
         }
         ImGui::EndChild();
-        if (ImGui::Button(u8"Сохранить")) { if (SaveIni(*g_edit)) Status(u8"Настройки сохранены: " + g_edit->path); else Status(u8"Не удалось сохранить настройки"); }
-        ImGui::SameLine(); if (ImGui::Button(u8"Открыть в Блокноте")) ShellExecuteW(nullptr, L"open", L"notepad.exe", W("\"" + g_edit->path + "\"").c_str(), nullptr, SW_SHOWNORMAL);
-        ImGui::SameLine(); if (ImGui::Button(u8"Перечитать")) { std::string p = g_edit->path; LoadIni(p, *g_edit); }
-        ImGui::SameLine(); ImGui::TextColored(T.dim, u8"Наведите на имя параметра — подсказка. Изменения действуют после перезапуска игры.");
+        if (ImGui::Button(L_(u8"Сохранить", u8"Save"))) { if (SaveIni(*g_edit)) Status(L_(u8"Настройки сохранены: ", u8"Settings saved: ") + g_edit->path); else Status(L_(u8"Не удалось сохранить настройки", u8"Cannot save the settings")); }
+        ImGui::SameLine(); if (ImGui::Button(L_(u8"Открыть в Блокноте", u8"Open in Notepad"))) ShellExecuteW(nullptr, L"open", L"notepad.exe", W("\"" + g_edit->path + "\"").c_str(), nullptr, SW_SHOWNORMAL);
+        ImGui::SameLine(); if (ImGui::Button(L_(u8"Перечитать", u8"Reload"))) { std::string p = g_edit->path; LoadIni(p, *g_edit); }
+        ImGui::SameLine(); ImGui::TextColored(T.dim, L_(u8"Наведите на имя параметра — подсказка. Изменения действуют после перезапуска игры.", u8"Hover a setting name for a hint. Changes apply after restarting the game."));
     }
     ImGui::End();
     if (g_captureLine >= 0) {                                    // the next key pressed becomes the value
@@ -699,7 +711,7 @@ static void DrawIniEditor() {
 static void OpenIni(const Mod &m) {
     std::string p = g_plugins + "\\" + IniOf(m);
     auto ini = std::make_unique<IniFile>();
-    if (!LoadIni(p, *ini)) { g_status = u8"Нет файла настроек " + p + u8" — установите мод"; return; }
+    if (!LoadIni(p, *ini)) { g_status = L_(u8"Нет файла настроек ", u8"No settings file ") + p + L_(u8" — установите мод", u8" - install the mod"); return; }
     g_edit = std::move(ini); g_editTitle = m.id;
 }
 static void OpenLauncherIni() { auto ini = std::make_unique<IniFile>(); if (LoadIni(g_cfgPath, *ini)) { g_edit = std::move(ini); g_editTitle = "EDF6 Launcher"; } }
@@ -710,10 +722,10 @@ static int MissingCount() { int n = 0; for (auto &m : g_mods) if (m.inManifest &
 static void DrawModsTable(bool busy) {
     const Theme &T = TH();
     if (ImGui::BeginTable("mods", 5, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) {
-        ImGui::TableSetupColumn(u8"Вкл", ImGuiTableColumnFlags_WidthFixed, 40);
-        ImGui::TableSetupColumn(u8"Мод");
-        ImGui::TableSetupColumn(u8"Установлен", ImGuiTableColumnFlags_WidthFixed, 100);
-        ImGui::TableSetupColumn(u8"На GitHub", ImGuiTableColumnFlags_WidthFixed, 100);
+        ImGui::TableSetupColumn(L_(u8"Вкл", u8"On"), ImGuiTableColumnFlags_WidthFixed, 40);
+        ImGui::TableSetupColumn(L_(u8"Мод", u8"Mod"));
+        ImGui::TableSetupColumn(L_(u8"Установлен", u8"Installed"), ImGuiTableColumnFlags_WidthFixed, 100);
+        ImGui::TableSetupColumn(L_(u8"На GitHub", u8"On GitHub"), ImGuiTableColumnFlags_WidthFixed, 100);
         ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 380);
         ImGui::TableHeadersRow();
         for (size_t i = 0; i < g_mods.size(); ++i) {
@@ -725,11 +737,12 @@ static void DrawModsTable(bool busy) {
             ImGui::EndDisabled();
             ImGui::TableNextColumn();
             ImGui::PushFont(g_bold); ImGui::Text("%s", m.id.c_str()); ImGui::PopFont();
-            if (!m.inManifest) { ImGui::SameLine(); ImGui::TextColored(T.dim, u8"(не из репозитория)"); }
-            if (!m.description.empty()) { ImGui::PushTextWrapPos(); ImGui::TextColored(T.dim, "%s", m.description.c_str()); ImGui::PopTextWrapPos(); }
+            if (!m.inManifest) { ImGui::SameLine(); ImGui::TextColored(T.dim, L_(u8"(не из репозитория)", u8"(not from the repository)")); }
+            const std::string &desc = g_en && !m.descriptionEn.empty() ? m.descriptionEn : m.description;
+            if (!desc.empty()) { ImGui::PushTextWrapPos(); ImGui::TextColored(T.dim, "%s", desc.c_str()); ImGui::PopTextWrapPos(); }
             ImGui::TableNextColumn();
-            if (!m.present) ImGui::TextColored(T.dim, u8"нет");
-            else if (m.installed == "?") { ImGui::Text(u8"есть"); if (ImGui::IsItemHovered()) ImGui::SetTooltip(u8"Установлен вручную, версия неизвестна"); }
+            if (!m.present) ImGui::TextColored(T.dim, L_(u8"нет", u8"no"));
+            else if (m.installed == "?") { ImGui::Text(L_(u8"есть", u8"yes")); if (ImGui::IsItemHovered()) ImGui::SetTooltip(L_(u8"Установлен вручную, версия неизвестна", u8"Installed by hand, version unknown")); }
             else ImGui::Text("%s", m.installed.c_str());
             ImGui::TableNextColumn();
             bool upd = m.inManifest && m.present && m.installed != m.version;
@@ -740,19 +753,19 @@ static void DrawModsTable(bool busy) {
             ImGui::TableNextColumn();
             ImGui::BeginDisabled(busy);
             if (m.inManifest && (!m.present || upd)) {
-                if (ImGui::Button(m.present ? u8"Обновить" : u8"Установить", ImVec2(110, 0))) {
+                if (ImGui::Button(m.present ? L_(u8"Обновить", u8"Update") : L_(u8"Установить", u8"Install"), ImVec2(110, 0))) {
                     Mod copy = m;
                     RunWorker([copy] { std::string msg; InstallMod(copy, msg); Status(msg); });
                 }
             } else ImGui::Dummy(ImVec2(110, 0));
-            ImGui::SameLine(); if (ImGui::Button(u8"Настройки")) OpenIni(m);
-            ImGui::SameLine(); if (ImGui::Button(u8"Лог")) { std::string p = g_plugins + "\\" + (m.log.empty() ? m.id + ".log" : m.log); if (Exists(p)) OpenPath(p); else g_status = u8"Лога пока нет: " + p; }
-            if (!m.report.empty()) { ImGui::SameLine(); if (ImGui::Button(u8"Отчёт")) { std::string p = g_plugins + "\\" + m.report; if (Exists(p)) OpenPath(p); else g_status = u8"Отчёта пока нет — сыграйте миссию"; } }
-            if (m.present) { ImGui::SameLine(); if (ImGui::Button(u8"Удалить")) ImGui::OpenPopup("del"); }
+            ImGui::SameLine(); if (ImGui::Button(L_(u8"Настройки", u8"Settings"))) OpenIni(m);
+            ImGui::SameLine(); if (ImGui::Button(L_(u8"Лог", u8"Log"))) { std::string p = g_plugins + "\\" + (m.log.empty() ? m.id + ".log" : m.log); if (Exists(p)) OpenPath(p); else g_status = L_(u8"Лога пока нет: ", u8"No log yet: ") + p; }
+            if (!m.report.empty()) { ImGui::SameLine(); if (ImGui::Button(L_(u8"Отчёт", u8"Report"))) { std::string p = g_plugins + "\\" + m.report; if (Exists(p)) OpenPath(p); else g_status = L_(u8"Отчёта пока нет — сыграйте миссию", u8"No report yet - play a mission"); } }
+            if (m.present) { ImGui::SameLine(); if (ImGui::Button(L_(u8"Удалить", u8"Remove"))) ImGui::OpenPopup("del"); }
             if (ImGui::BeginPopup("del")) {
-                ImGui::Text(u8"Удалить %s? Настройки и логи останутся.", m.id.c_str());
-                if (ImGui::Button(u8"Удалить")) { std::string msg; RemoveMod(m, msg); g_status = msg; ImGui::CloseCurrentPopup(); }
-                ImGui::SameLine(); if (ImGui::Button(u8"Отмена")) ImGui::CloseCurrentPopup();
+                ImGui::Text(L_(u8"Удалить %s? Настройки и логи останутся.", u8"Remove %s? Settings and logs stay."), m.id.c_str());
+                if (ImGui::Button(L_(u8"Удалить", u8"Remove"))) { std::string msg; RemoveMod(m, msg); g_status = msg; ImGui::CloseCurrentPopup(); }
+                ImGui::SameLine(); if (ImGui::Button(L_(u8"Отмена", u8"Cancel"))) ImGui::CloseCurrentPopup();
                 ImGui::EndPopup();
             }
             ImGui::EndDisabled();
@@ -760,30 +773,30 @@ static void DrawModsTable(bool busy) {
         }
         ImGui::EndTable();
     }
-    if (g_mods.empty()) ImGui::TextColored(T.dim, u8"Список модов пуст: %s", g_manifestOk ? "" : g_manifestErr.c_str());
+    if (g_mods.empty()) ImGui::TextColored(T.dim, L_(u8"Список модов пуст: %s", u8"The mod list is empty: %s"), g_manifestOk ? "" : g_manifestErr.c_str());
 }
 static void UpdateButtons(bool busy) {
     ImGui::BeginDisabled(busy);
-    if (ImGui::Button(u8"Проверить обновления")) RunWorker([] { Status(u8"Проверяю..."); LoadManifest(); });
+    if (ImGui::Button(L_(u8"Проверить обновления", u8"Check for updates"))) RunWorker([] { Status(L_(u8"Проверяю...", u8"Checking...")); LoadManifest(); });
     ImGui::SameLine();
     ImGui::BeginDisabled(!AnyUpdate());
-    if (ImGui::Button(u8"Обновить всё")) {
+    if (ImGui::Button(L_(u8"Обновить всё", u8"Update all"))) {
         std::vector<Mod> todo; for (auto &m : g_mods) if (m.inManifest && m.present && m.installed != m.version) todo.push_back(m);
         RunWorker([todo] { std::string all; for (auto &m : todo) { std::string msg; InstallMod(m, msg); all += msg + "; "; } Status(all); });
     }
     ImGui::EndDisabled();
     ImGui::EndDisabled();
-    ImGui::SameLine(); if (ImGui::Button(u8"Папка модов")) OpenPath(g_plugins);
+    ImGui::SameLine(); if (ImGui::Button(L_(u8"Папка модов", u8"Mods folder"))) OpenPath(g_plugins);
 }
 static void ModLoaderLine() {
     const Theme &T = TH();
-    if (ModLoaderOk()) ImGui::TextColored(T.accent2, u8"EDFModLoader установлен");
+    if (ModLoaderOk()) ImGui::TextColored(T.accent2, L_(u8"EDFModLoader установлен", u8"EDFModLoader installed"));
     else {
-        ImGui::TextColored(T.bad, u8"EDFModLoader не найден (нет winmm.dll или EDFModLoader.dll) — моды не загрузятся");
-        ImGui::SameLine(); if (ImGui::SmallButton(u8"Скачать EDFModLoader")) OpenPath(g_modloaderPage);
+        ImGui::TextColored(T.bad, L_(u8"EDFModLoader не найден (нет winmm.dll или EDFModLoader.dll) — моды не загрузятся", u8"EDFModLoader not found (no winmm.dll or EDFModLoader.dll) - mods will not load"));
+        ImGui::SameLine(); if (ImGui::SmallButton(L_(u8"Скачать EDFModLoader", u8"Get EDFModLoader"))) OpenPath(g_modloaderPage);
     }
     if (!Exists(g_gameDir + "\\" + g_gameExe) && g_gameExe.find(':') == std::string::npos)
-        ImGui::TextColored(T.bad, u8"В папке игры нет %s — укажите GameDir/GameExe в настройках лаунчера", g_gameExe.c_str());
+        ImGui::TextColored(T.bad, L_(u8"В папке игры нет %s — укажите GameDir/GameExe в настройках лаунчера", u8"%s is not in the game folder - set GameDir/GameExe in the launcher settings"), g_gameExe.c_str());
 }
 
 // ---- retro layout --------------------------------------------------------------------------------------------
@@ -801,14 +814,14 @@ static void DrawRetro(bool busy) {
     float big = Ht * 0.105f;
     OutlinedText(dl, g_big, big * 0.62f, ImVec2(Wd * 0.045f, Ht * 0.05f), U32(T.text), IM_COL32(0, 0, 0, 255), "EARTH DEFENSE FORCE", 3);
     OutlinedText(dl, g_big, big * 2.0f, ImVec2(Wd * 0.045f + big * 0.1f, Ht * 0.05f + big * 0.48f), U32(T.accent), IM_COL32(0, 0, 0, 255), "6", 4);
-    OutlinedText(dl, g_mid, big * 0.42f, ImVec2(Wd * 0.045f + big * 1.25f, Ht * 0.05f + big * 0.95f), U32(T.accent2), IM_COL32(0, 0, 0, 255), u8"Л А У Н Ч Е Р   М О Д О В", 2);
+    OutlinedText(dl, g_mid, big * 0.42f, ImVec2(Wd * 0.045f + big * 1.25f, Ht * 0.05f + big * 0.95f), U32(T.accent2), IM_COL32(0, 0, 0, 255), L_(u8"Л А У Н Ч Е Р   М О Д О В", u8"M O D   L A U N C H E R"), 2);
     OutlinedText(dl, g_bold, big * 0.24f, ImVec2(Wd * 0.045f + big * 1.27f, Ht * 0.05f + big * 1.45f), A(IM_COL32(255, 255, 255, 255), 0.8f), IM_COL32(0, 0, 0, 200),
-                 u8"Земля сама себя не защитит. Сначала — моды.", 1.5f);
+                 L_(u8"Земля сама себя не защитит. Сначала — моды.", u8"Earth won't defend itself. Mods first."), 1.5f);
 
     // the plates: a diagonal stack on the right
     struct B { const char *label; int action; };
     bool running = GameRunning();
-    B buttons[] = { { running ? u8"ИГРА ИДЁТ" : u8"ИГРАТЬ", 0 }, { u8"МОДЫ", 1 }, { u8"НАСТРОЙКИ", 2 }, { u8"ОТЧЁТ", 3 }, { u8"ВЫХОД", 4 } };
+    B buttons[] = { { running ? L_(u8"ИГРА ИДЁТ", u8"IN GAME") : L_(u8"ИГРАТЬ", u8"PLAY"), 0 }, { L_(u8"МОДЫ", u8"MODS"), 1 }, { L_(u8"НАСТРОЙКИ", u8"SETTINGS"), 2 }, { L_(u8"ОТЧЁТ", u8"REPORT"), 3 }, { L_(u8"ВЫХОД", u8"EXIT"), 4 } };
     float bw = Wd * 0.30f, bh = Ht * 0.085f, x0 = Wd * 0.60f, y0 = Ht * 0.24f;
     ImGui::BeginDisabled(g_panel != P_NONE || g_edit != nullptr);
     for (int i = 0; i < 5; ++i) {
@@ -819,20 +832,20 @@ static void DrawRetro(bool busy) {
             case 0: Play(); break;
             case 1: g_panel = P_MODS; break;
             case 2: g_panel = P_SETTINGS; break;
-            case 3: { std::string p = g_plugins + "\\EDFStats\\latest.html"; if (Exists(p)) OpenPath(p); else g_status = u8"Отчёта пока нет — сыграйте миссию с EDFStats"; } break;
+            case 3: { std::string p = g_plugins + "\\EDFStats\\latest.html"; if (Exists(p)) OpenPath(p); else g_status = L_(u8"Отчёта пока нет — сыграйте миссию с EDFStats", u8"No report yet - play a mission with EDFStats"); } break;
             case 4: PostQuitMessage(0); break;
             }
         }
     }
     ImGui::EndDisabled();
     // stickers
-    if (!ModLoaderOk()) Starburst(ImVec2(x0 - Wd * 0.05f, y0 + bh * 2.1f), Ht * 0.075f, u8"НЕТ", u8"ЗАГРУЗЧИКА!");
-    else if (AnyUpdate()) Starburst(ImVec2(x0 - Wd * 0.04f, y0 + bh * 2.1f), Ht * 0.075f, u8"НОВОЕ!", u8"обновления");
-    else if (int n = MissingCount()) { std::string s = "+" + std::to_string(n); Starburst(ImVec2(x0 - Wd * 0.04f, y0 + bh * 2.1f), Ht * 0.07f, s.c_str(), n == 1 ? u8"новый мод" : u8"новых мода"); }
+    if (!ModLoaderOk()) Starburst(ImVec2(x0 - Wd * 0.05f, y0 + bh * 2.1f), Ht * 0.075f, L_(u8"НЕТ", u8"NO"), L_(u8"ЗАГРУЗЧИКА!", u8"LOADER!"));
+    else if (AnyUpdate()) Starburst(ImVec2(x0 - Wd * 0.04f, y0 + bh * 2.1f), Ht * 0.075f, L_(u8"НОВОЕ!", u8"NEW!"), L_(u8"обновления", u8"updates"));
+    else if (int n = MissingCount()) { std::string s = "+" + std::to_string(n); Starburst(ImVec2(x0 - Wd * 0.04f, y0 + bh * 2.1f), Ht * 0.07f, s.c_str(), n == 1 ? L_(u8"новый мод", u8"new mod") : L_(u8"новых мода", u8"new mods")); }
 
     // installed mods as dog tags, bottom left
     float ty = Ht * 0.62f;
-    OutlinedText(dl, g_mid, Ht * 0.032f, ImVec2(Wd * 0.045f, ty), U32(T.accent), IM_COL32(0, 0, 0, 255), u8"В СТРОЮ:", 2);
+    OutlinedText(dl, g_mid, Ht * 0.032f, ImVec2(Wd * 0.045f, ty), U32(T.accent), IM_COL32(0, 0, 0, 255), L_(u8"В СТРОЮ:", u8"ON DUTY:"), 2);
     ty += Ht * 0.045f;
     for (auto &m : g_mods) {
         if (!m.present) continue;
@@ -846,18 +859,18 @@ static void DrawRetro(bool busy) {
     dl->AddRectFilled(ImVec2(0, tyy), ImVec2(Wd, tyy + th), A(U32(T.bg), 0.85f));
     dl->AddLine(ImVec2(0, tyy), ImVec2(Wd, tyy), U32(T.accent), 2);
     dl->AddRectFilled(ImVec2(0, tyy), ImVec2(Wd * 0.13f, tyy + th), U32(T.accent));
-    OutlinedText(dl, g_mid, th * 0.55f, ImVec2(Wd * 0.012f, tyy + th * 0.2f), IM_COL32(20, 14, 4, 255), A(IM_COL32(255, 255, 255, 255), 0.3f), u8"СВОДКА", 1);
+    OutlinedText(dl, g_mid, th * 0.55f, ImVec2(Wd * 0.012f, tyy + th * 0.2f), IM_COL32(20, 14, 4, 255), A(IM_COL32(255, 255, 255, 255), 0.3f), L_(u8"СВОДКА", u8"NEWS"), 1);
     std::string news = g_status + u8"   •   ";
     for (auto &m : g_mods) if (m.inManifest) news += m.id + " " + m.version + u8"   •   ";
-    news += u8"Гигантские муравьи замечены в секторе 7   •   F6 в бою — панель урона, F7 — таблица   •   Не стреляйте по своим, EDFStats всё видит   •   ";
-    news += u8"Папка игры: " + g_gameDir + u8"   •   ";
+    news += L_(u8"Гигантские муравьи замечены в секторе 7   •   F6 в бою — панель урона, F7 — таблица   •   Не стреляйте по своим, EDFStats всё видит   •   ", u8"Giant ants spotted in sector 7   •   F6 in battle - damage panel, F7 - scoreboard   •   Don't shoot your squad, EDFStats sees everything   •   ");
+    news += L_(u8"Папка игры: ", u8"Game folder: ") + g_gameDir + u8"   •   ";
     ImVec2 ns = g_bold->CalcTextSizeA(th * 0.5f, FLT_MAX, 0, news.c_str());
     float off = fmodf(t * 70.f, ns.x);
     dl->PushClipRect(ImVec2(Wd * 0.13f, tyy), ImVec2(Wd, tyy + th), true);
     for (float sx = Wd * 0.14f - off; sx < Wd; sx += ns.x) dl->AddText(g_bold, th * 0.5f, ImVec2(sx, tyy + th * 0.24f), U32(T.text), news.c_str());
     dl->PopClipRect();
     ImGui::SetCursorScreenPos(ImVec2(Wd - 110, 12));
-    ImGui::TextColored(T.dim, u8"версия %s", LAUNCHER_VERSION);
+    ImGui::TextColored(T.dim, L_(u8"версия %s", u8"version %s"), LAUNCHER_VERSION);
     ImGui::End();
 
     // panels over the art
@@ -865,7 +878,7 @@ static void DrawRetro(bool busy) {
         ImGui::SetNextWindowSize(ImVec2(Wd * (g_panel == P_MODS ? 0.86f : 0.6f), g_panel == P_MODS ? Ht * 0.74f : Ht * 0.34f), ImGuiCond_Always);
         ImGui::SetNextWindowPos(ImVec2(Wd * 0.5f, Ht * 0.47f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
         bool open = true;
-        const char *title = g_panel == P_MODS ? u8"АРСЕНАЛ МОДОВ###panel" : u8"НАСТРОЙКИ###panel";
+        const char *title = g_panel == P_MODS ? L_(u8"АРСЕНАЛ МОДОВ###panel", u8"MOD ARSENAL###panel") : L_(u8"НАСТРОЙКИ###panel", u8"SETTINGS###panel");
         ImGui::PushFont(g_bold);
         if (ImGui::Begin(title, &open, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings)) {
             ImGui::PopFont();
@@ -876,12 +889,12 @@ static void DrawRetro(bool busy) {
                 ImGui::EndChild();
                 UpdateButtons(busy);
             } else {
-                ImGui::PushFont(g_bold); ImGui::Text(u8"Игра"); ImGui::PopFont();
-                ImGui::TextColored(T.dim, u8"Папка: %s", g_gameDir.c_str());
-                ImGui::TextColored(T.dim, u8"Запуск: %s %s", g_gameExe.c_str(), g_gameArgs.c_str());
+                ImGui::PushFont(g_bold); ImGui::Text(L_(u8"Игра", u8"Game")); ImGui::PopFont();
+                ImGui::TextColored(T.dim, L_(u8"Папка: %s", u8"Folder: %s"), g_gameDir.c_str());
+                ImGui::TextColored(T.dim, L_(u8"Запуск: %s %s", u8"Start: %s %s"), g_gameExe.c_str(), g_gameArgs.c_str());
                 ModLoaderLine();
-                if (ImGui::Button(u8"Настройки лаунчера (папка, exe, аргументы)")) OpenLauncherIni();
-                ImGui::SameLine(); if (ImGui::Button(u8"Папка игры")) OpenPath(g_gameDir);
+                if (ImGui::Button(L_(u8"Настройки лаунчера (папка, exe, аргументы)", u8"Launcher settings (folder, exe, arguments)"))) OpenLauncherIni();
+                ImGui::SameLine(); if (ImGui::Button(L_(u8"Папка игры", u8"Game folder"))) OpenPath(g_gameDir);
             }
         } else ImGui::PopFont();
         ImGui::End();
@@ -933,8 +946,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
         else if (a == L"--manifest" && i + 1 < argc) g_manifestSrc = U(argv[++i]);
         else if (a == L"--screenshot" && i + 1 < argc) shot = U(argv[++i]);
         else if (a == L"--selftest-install") selftest = true;
+        else if (a == L"--lang" && i + 1 < argc) g_langArg = U(argv[++i]);
     }
     LoadConfig();
+    g_status = L_(u8"Готово", u8"Ready");
     if (selftest) {                    // install every mod from the list into --game-dir and report (no window)
         AttachConsole(ATTACH_PARENT_PROCESS); FILE *o = _wfopen(W(ExeDir() + "\\selftest.txt").c_str(), L"w");
         LoadManifest();
@@ -972,7 +987,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     ApplyTheme(g_theme);
     ImGui_ImplWin32_Init(hwnd); ImGui_ImplDX11_Init(g_dev, g_ctx);
 
-    if (shot.empty()) RunWorker([] { Status(u8"Загружаю список модов..."); LoadManifest(); });
+    if (shot.empty()) RunWorker([] { Status(L_(u8"Загружаю список модов...", u8"Loading the mod list...")); LoadManifest(); });
     else { LoadManifest(); }
 
     int frames = 0;

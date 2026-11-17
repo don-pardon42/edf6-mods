@@ -12,12 +12,15 @@ HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODS = [
     {"id": "EDFStats", "version": "0.9", "tag": "edfstats-v0.9",
      "description": "Статистика игроков в кооперативе: урон, DPS, убийства, урон по своим, поднятия. Окно в игре (F6/F7) и HTML-отчёт после миссии.",
+     "description_en": "Co-op player statistics: damage, DPS, kills, friendly fire, rescues. In-game overlay (F6/F7) and an HTML report after each mission.",
      "files": ["EDFStats.dll", "EDFStats.ini"], "log": "EDFStats.log", "report": "EDFStats\\latest.html"},
     {"id": "SpectateCam", "version": "0.4", "tag": "spectatecam-v0.4",
      "description": "После смерти камера следит за живыми союзниками: = / - игроки, 9 NPC, 0 к себе.",
+     "description_en": "After you die the camera follows living allies: = / - players, 9 NPCs, 0 back to you.",
      "files": ["SpectateCam.dll", "SpectateCam.ini"], "log": "SpectateCam.log"},
     {"id": "SquadSync", "version": "0.1", "tag": "squadsync-v0.1",
      "description": "Подтягивает персонажей других игроков к их настоящей позиции, когда сетевая синхронизация отстаёт. Нужны IP игроков в настройках.",
+     "description_en": "Pulls other players' characters to their real position when the game's network sync lags behind. Needs the players' IPs in the settings.",
      "files": ["SquadSync.dll", "SquadSync.ini"], "log": "SquadSync.log"},
 ]
 
