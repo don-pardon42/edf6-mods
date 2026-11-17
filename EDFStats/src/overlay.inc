@@ -136,8 +136,6 @@ static void DrawBoard(const LiveView &v) {
         { "MVP", [](const Summary &s) { return (double)s.dmg; } },
         { L_(u8"Палач", u8"Executioner"), [](const Summary &s) { return (double)s.kills; } },
         { L_(u8"Пиковая мощь", u8"Peak power"), [](const Summary &s) { return (double)s.peak1; } },
-        { L_(u8"Спасатель", u8"Lifesaver"), [](const Summary &s) { return (double)s.revives; } },
-        { L_(u8"Медик", u8"Medic"), [](const Summary &s) { return (double)s.heal; } },
         { L_(u8"Стена", u8"Wall"), [](const Summary &s) { return (double)(s.taken + s.takenVeh); } },
         { L_(u8"Турист", u8"Tourist"), [](const Summary &s) { return (double)s.dist; } },
         { L_(u8"Предатель", u8"Traitor"), [](const Summary &s) { return (double)s.ffPlayers; } },
@@ -154,7 +152,7 @@ static void DrawBoard(const LiveView &v) {
     ImGui::Spacing();
 
     static const char *cols[] = { L_(u8"Игрок", u8"Player"), L_(u8"Урон", u8"Damage"), L_(u8"Пик DPS", u8"Peak DPS"), L_(u8"Убийства", u8"Kills"), L_(u8"Части", u8"Parts"), L_(u8"Лучший", u8"Best"), L_(u8"Получил", u8"Taken"),
-                                  L_(u8"Смерти", u8"Deaths"), L_(u8"Поднял", u8"Rescues"), L_(u8"Лечение", u8"Healing"), L_(u8"По игрокам", u8"To players"), L_(u8"По NPC", u8"To NPCs"), L_(u8"Себе", u8"To self"), L_(u8"Пешком", u8"On foot"), L_(u8"Техника", u8"Vehicles") };
+                                  L_(u8"Смерти", u8"Deaths"), L_(u8"По игрокам", u8"To players"), L_(u8"По NPC", u8"To NPCs"), L_(u8"Себе", u8"To self"), L_(u8"Пешком", u8"On foot"), L_(u8"Техника", u8"Vehicles") };
     const int nc = sizeof cols / sizeof cols[0];
     if (ImGui::BeginTable("t", nc, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingFixedFit)) {
         for (int i = 0; i < nc; ++i) ImGui::TableSetupColumn(cols[i]);
@@ -166,7 +164,7 @@ static void DrawBoard(const LiveView &v) {
             ImGui::TextColored(r.local ? GREEN : ImVec4(0.91f, 0.94f, 0.91f, 1), "%s", RowName(r));
             ImGui::SameLine(); ImGui::TextColored(DIM, "%s%s", s.cls, r.partial ? L_(u8" · неполн.", u8" · partial") : "");
             auto num = [](double x) { ImGui::TableNextColumn(); ImGui::Text("%s", NumSp(x).c_str()); };
-            num(s.dmg); num(s.peak1); num(s.kills); num(s.parts); num(s.best); num(s.taken + s.takenVeh); num(s.deaths); num(s.revives); num(s.heal);
+            num(s.dmg); num(s.peak1); num(s.kills); num(s.parts); num(s.best); num(s.taken + s.takenVeh); num(s.deaths);
             ImGui::TableNextColumn(); if (s.ffPlayers > 0) ImGui::TextColored(RED, "%s", NumSp(s.ffPlayers).c_str()); else ImGui::Text("0");
             num(s.ffNpc); num(s.selfDmg);
             ImGui::TableNextColumn(); ImGui::Text(L_(u8"%s м", u8"%s m"), NumSp(s.dist).c_str());

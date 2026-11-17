@@ -47,8 +47,8 @@ int main(int argc, char **argv) {
     g_missionStartMs = GetTickCount64() - 263000;
     PStats a; a.cls = "Engineer"; a.dmg = 14157; a.kills = 17; a.parts = 1; a.best = 266; a.taken = 394; a.deaths = 1; a.dist = 900; a.ffNpc = 531; a.selfDmg = 40;
     a.dps.Add(GetTickCount64() - 300, 520); a.dps.Add(GetTickCount64() - 100, 300); a.dps.Add(GetTickCount64() - 3000, 900);
-    PStats b; b.cls = "HeavyArmor"; b.dmg = 13575; b.kills = 9; b.parts = 8; b.best = 60; b.taken = 40; b.dist = 716; b.heal = 0; b.dps.peak1 = 2497;
-    PStats c; c.cls = "PaleWing"; c.dmg = 9100; c.kills = 21; c.best = 812; c.taken = 1200; c.deaths = 2; c.dist = 3400; c.heal = 300;
+    PStats b; b.cls = "HeavyArmor"; b.dmg = 13575; b.kills = 9; b.parts = 8; b.best = 60; b.taken = 40; b.dist = 716; b.dps.peak1 = 2497;
+    PStats c; c.cls = "PaleWing"; c.dmg = 9100; c.kills = 21; c.best = 812; c.taken = 1200; c.deaths = 2; c.dist = 3400;
     LiveView v;
     v.rows.push_back({ MakeSummary(a, u8"Игрок 1"), true, false });
     Row rb{ MakeSummary(b, u8"Игрок 2"), false, false }; rb.s.ffPlayers = 150; v.rows.push_back(rb);

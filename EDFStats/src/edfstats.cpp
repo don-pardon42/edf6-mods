@@ -1,7 +1,7 @@
 // EDFStats 0.9 - EDF6 player statistics plugin for EDFModLoader.
 // Hooks GameObjectBase::ApplyDamage (EDF.dll+547960, build 2024-06-03), the single function
 // every hit / heal on every game object goes through, and counts for this machine's player:
-// damage, peak DPS, kills, destroyed parts, friendly fire, damage taken, deaths, healing,
+// damage, peak DPS, kills, destroyed parts, friendly fire, damage taken, deaths, damage per weapon,
 // vehicle damage, kills per enemy type, distance travelled.
 // Every player runs the plugin; each one sends its own numbers to the others through the game's
 // own Epic Online Services P2P connection (separate socket "EDFStats", no IPs or ports needed),
@@ -35,11 +35,12 @@
 #include <set>
 #include <unordered_map>
 #include <algorithm>
+#include <intrin.h>
 #include "PluginAPI.h"
 #include "MinHook.h"
 #pragma comment(lib, "ws2_32.lib")
 
-static const char *VERSION = "0.9.2";
+static const char *VERSION = "0.10";
 // ---- language: Russian for ru/uk/be/kk Windows, English otherwise; EDFStats.ini Language=auto|ru|en overrides
 static bool g_en = false;
 static inline const char *L_(const char *ru, const char *en) { return g_en ? en : ru; }
@@ -56,8 +57,8 @@ static const size_t FN_TEAMTABLE = 0x19B;
 // ui::HUiMissionResult constructor (EDF.dll+8D28C0): the game opens the mission result / rewards screen
 static const char *SIG_RESULT_CTOR = "48 89 5C 24 18 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 60 FB FF FF";
 // static SoldierBase *SoldierBase::CreateOnlinePlayerObject(unsigned slot, const Matrix &where, EquipWeaponType)
-// (EDF.dll+590E60): a player character is spawned in an online game - at mission start and, as it looks,
-// when a downed player is rescued (the rescued player gets a fresh object; see the 2026-11-14 test)
+// (EDF.dll+590E60): a player character is spawned in an online game (mission start; the game also replaces
+// a player's object now and then, stats are moved to the new object)
 static const char *SIG_CREATE_PLAYER = "48 89 5C 24 08 48 89 74 24 10 55 57 41 54 41 56 41 57 48 8D 6C 24 C9 48 81 EC F0 00 00 00";
 // its deleting destructor (EDF.dll+8D66B0): the result screen closes
 static const char *SIG_RESULT_DTOR = "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 20 48 8D 05 ?? ?? ?? ?? 48 8B D9 48 89 01 8B EA 48 8B 89 D0 07 00 00";
@@ -88,7 +89,7 @@ static void Log(const char *fmt, ...) { va_list a; va_start(a, fmt); Logv(true, 
 static void LogHit(const char *fmt, ...) { va_list a; va_start(a, fmt); Logv(false, fmt, a); va_end(a); }
 
 // ---- class info, cached per vtable ---------------------------------------------------------
-enum Kind : uint8_t { K_OTHER, K_SOLDIER, K_VEHICLE };
+enum Kind : uint8_t { K_OTHER, K_SOLDIER, K_VEHICLE, K_WEAPON, K_BULLET };
 struct ClsInfo { std::string name; Kind kind = K_OTHER; };
 static std::unordered_map<uintptr_t, ClsInfo> g_cls;            // guarded by g_cs
 static const ClsInfo &Cls(const uint8_t *obj) {
@@ -110,6 +111,8 @@ static const ClsInfo &Cls(const uint8_t *obj) {
     const std::string &n = ci.name;
     if (n == "AssultSoldier" || n == "PaleWing" || n == "HeavyArmor" || n == "Engineer") ci.kind = K_SOLDIER;
     else if (n.compare(0, 7, "Vehicle") == 0) ci.kind = K_VEHICLE;
+    else if (n.compare(0, 7, "Weapon_") == 0) ci.kind = K_WEAPON;                       // Weapon_BasicShoot, Weapon_VehicleShoot ...
+    else if (n.find("Bullet") != std::string::npos && n.find('@') == std::string::npos) ci.kind = K_BULLET;  // SolidBullet01 ...
     return g_cls.emplace(vt, ci).first->second;
 }
 static const char *ClassName(const std::string &c) {
@@ -173,18 +176,26 @@ struct DpsMeter {                    // 100 ms buckets over the last 5 s
         return sum;
     }
 };
+struct WStats {                      // one weapon of one player
+    double dmg = 0, best = 0; unsigned hits = 0, kills = 0; DpsMeter dps;
+    int64_t lastSec = -1; unsigned activeSecs = 0;          // seconds in which this weapon hit something
+    bool veh = false;
+    void Add(uint64_t ms, double v, bool kill) {
+        dmg += v; ++hits; best = std::max(best, v); dps.Add(ms, v); if (kill) ++kills;
+        int64_t sec = (int64_t)(ms / 1000); if (sec != lastSec) { lastSec = sec; ++activeSecs; }
+    }
+};
 struct PStats {
     std::string cls;
-    double dmg = 0, dmgVeh = 0, best = 0, heal = 0, healSelf = 0, dist = 0, distVeh = 0;
+    double dmg = 0, dmgVeh = 0, best = 0, dist = 0, distVeh = 0;
     double ffNpc = 0, ffPlayersSeen = 0, selfDmg = 0;      // dealt to allied NPCs / to other players / to yourself
     double taken = 0, takenVeh = 0, takenFF = 0;            // received from enemies (on foot / in a vehicle) / from allies
     unsigned hits = 0, kills = 0, killsVeh = 0, parts = 0, ffKills = 0, deaths = 0;   // ffKills: allied NPCs killed
-    unsigned revives = 0, revived = 0;                      // rescued other players / was rescued
-    double downSecs = 0;                                     // time spent down before being rescued
     std::map<std::string, unsigned> killsBy;
     std::map<std::string, double> dmgBy;
     std::map<std::string, double> ffFrom;                   // friendly damage received from other players, by their class
     DpsMeter dps;
+    std::map<uint8_t *, WStats> weapons;                    // key: weapon object (nullptr = not recognised); this PC only
 };
 static std::map<uint8_t *, PStats> g_ps;            // key: soldier object of a player
 static uint8_t *g_localSol;
@@ -205,25 +216,130 @@ static uint8_t *Driver(uint8_t *v) {             // player soldier that drives v
     return nullptr;
 }
 
+// ---- weapons: which weapon a hit came from -------------------------------------------------------
+// A weapon object (Weapon_* class) fires bullet objects (*Bullet* classes). While a hit is applied, the
+// bullet and/or its weapon are still referenced from the callers' stack frames, so the stack above the hook
+// is scanned for them; a bullet found there is searched for the pointer to its weapon. Every class keeps
+// its own weapon objects, so the Fencer's four weapons (two of them firing at the same time) stay apart.
+// WeaponProbe=1 (EDFStats.ini) logs what was found, to check and improve this in the game.
+static uintptr_t g_vtLo, g_vtHi;              // EDF.dll .rdata: where vtables live
+static bool g_wprobe = true; static unsigned g_wprobeHits;
+static bool GameObj(uintptr_t p, Kind *k = nullptr) {
+    if (p < 0x10000 || p > 0x7FFFFFFFFFFFull || (p & 7)) return false;
+    uintptr_t vt = Rd<uintptr_t>((const void *)p);
+    if (vt < g_vtLo || vt >= g_vtHi) return false;
+    if (k) *k = Cls((const uint8_t *)p).kind;
+    return true;
+}
+static bool WcharOk(wchar_t c) { return (c >= 0x20 && c < 0x7F) || (c >= 0x400 && c < 0x460) || c == 0x2116 || c == 0x2013 || c == 0x2014 || c == 0xB7 || c == 0xAB || c == 0xBB; }
+static std::string Utf8(const wchar_t *w, int n) {
+    char b[256]; int k = WideCharToMultiByte(CP_UTF8, 0, w, n, b, sizeof b, nullptr, nullptr);
+    return std::string(b, k > 0 ? k : 0);
+}
+// a UTF-16 string of 3..60 good characters at p (zero terminated), "" otherwise
+static std::string ReadWStr(const void *p) {
+    wchar_t w[64] = {};
+    if (!SafeRead(p, w, sizeof w) && !SafeRead(p, w, 32)) return "";
+    int n = 0; while (n < 63 && w[n]) { if (!WcharOk(w[n])) return ""; ++n; }
+    if (n < 3 || n >= 61) return "";
+    return Utf8(w, n);
+}
+static bool LooksLikeName(const std::string &u) {     // weapon names: no paths, ids or file names
+    if (u.size() < 3) return false;
+    for (char c : u) if (c == '/' || c == '\\' || c == '_' || c == ':' || c == '.' || c == '%' || c == '=') return false;
+    bool letter = false; for (unsigned char c : u) if (isalpha(c) || c >= 0xD0) letter = true;
+    return letter;
+}
+struct WInfo { std::string name; };
+static std::unordered_map<uint8_t *, WInfo> g_weapons;      // weapon object -> its name (this mission)
+static void LogWeaponObject(uint8_t *w, uint8_t *owner) {   // WeaponProbe: strings, objects and the owner in a weapon object
+    std::set<std::string> seen; int lines = 0; std::string own;
+    for (size_t o = 0; o < 0x1800; o += 8) if (owner && Rd<uint8_t *>(w + o) == owner) { char b[16]; snprintf(b, sizeof b, " +%zX", o); own += b; }
+    Log("    probe weapon %p owner (shooter) at:%s", w, own.empty() ? " none" : own.c_str());
+    for (size_t o = 0; o < 0x1800 && lines < 40; o += 8) {
+        std::string in = ReadWStr(w + o);
+        if (!in.empty() && seen.insert(in).second) { Log("    probe weapon %p +%03zX inline \"%s\"", w, o, in.c_str()); ++lines; }
+        uintptr_t q = Rd<uintptr_t>(w + o);
+        if (q < 0x10000 || q > 0x7FFFFFFFFFFFull) continue;
+        std::string ps = ReadWStr((const void *)q);
+        if (!ps.empty() && seen.insert(ps).second) { Log("    probe weapon %p +%03zX -> \"%s\"", w, o, ps.c_str()); ++lines; }
+        Kind k; if (GameObj(q, &k) && k != K_WEAPON) { std::string cn = Cls((uint8_t *)q).name; if (seen.insert(cn).second) { Log("    probe weapon %p +%03zX -> object %s", w, o, cn.c_str()); ++lines; } }
+    }
+}
+static int g_weaponNo;
+static uint8_t *g_hitOwner;               // the shooter of the hit being matched (WeaponProbe)
+static const WInfo &Weapon(uint8_t *w) {
+    auto it = g_weapons.find(w);
+    if (it != g_weapons.end()) return it->second;
+    WInfo wi;
+    for (size_t o = 0; o < 0x1800 && wi.name.empty(); o += 8) {          // a name the HUD would show
+        uintptr_t q = Rd<uintptr_t>(w + o);
+        std::string c = (q >= 0x10000 && q <= 0x7FFFFFFFFFFFull) ? ReadWStr((const void *)q) : "";
+        if (c.empty()) c = ReadWStr(w + o);
+        if (LooksLikeName(c)) wi.name = c;
+    }
+    if (wi.name.empty()) {                       // not found: class name and a number
+        std::string cn = Cls(w).name; if (cn.compare(0, 7, "Weapon_") == 0) cn = cn.substr(7);
+        char b[96]; snprintf(b, sizeof b, "%s #%d", cn.c_str(), ++g_weaponNo); wi.name = b;
+    }
+    if (g_wprobe) { Log("probe: new weapon %p %s -> name \"%s\"", w, Cls(w).name.c_str(), wi.name.c_str()); LogWeaponObject(w, g_hitOwner); }
+    return g_weapons.emplace(w, wi).first->second;
+}
+static std::string WeaponName(uint8_t *w) { return w ? Weapon(w).name : L_(u8"Не определено", u8"Not recognised"); }
+// stack: address of the hook's return address; the callers' frames are above it
+static uint8_t *WeaponOfHit(const uint8_t *stack, const uint8_t *info) {
+    ULONG_PTR lo = 0, hi = 0; GetCurrentThreadStackLimits(&lo, &hi);
+    const uint8_t *end = stack + 0x2000; if (hi && end > (const uint8_t *)hi) end = (const uint8_t *)hi;
+    // the closest one wins: a weapon object, or a bullet object that points to its weapon
+    // (frames further up belong to the game loop and may hold unrelated weapons / bullets)
+    uint8_t *weapon = nullptr, *bullet = nullptr, *fromBullet = nullptr; long wOff = -1, bOff = -1, fbOff = -1;
+    for (const uint8_t *q = stack; q + 8 <= end && !weapon && !fromBullet; q += 8) {
+        uintptr_t v = *(const uintptr_t *)q;
+        Kind k; if (!GameObj(v, &k)) continue;
+        if (k == K_WEAPON) { weapon = (uint8_t *)v; wOff = (long)(q - stack); }
+        else if (k == K_BULLET && (uint8_t *)v != bullet) {
+            if (!bullet) { bullet = (uint8_t *)v; bOff = (long)(q - stack); }
+            for (size_t o = 0; o < 0xC00; o += 8) {
+                uintptr_t x = Rd<uintptr_t>((uint8_t *)v + o); Kind kx;
+                if (GameObj(x, &kx) && kx == K_WEAPON) { fromBullet = (uint8_t *)x; fbOff = (long)o; bullet = (uint8_t *)v; bOff = (long)(q - stack); break; }
+            }
+        }
+    }
+    uint8_t *w = fromBullet ? fromBullet : weapon;
+    if (g_wprobe && g_wprobeHits < 60) {
+        ++g_wprobeHits;
+        Log("probe hit: stack weapon %p %s (+%lX), bullet %p %s (+%lX) -> its weapon %p (+%lX) => %s", weapon,
+            weapon ? Cls(weapon).name.c_str() : "-", wOff, bullet, bullet ? Cls(bullet).name.c_str() : "-", bOff, fromBullet, fbOff,
+            WeaponName(w).c_str());
+        std::string objs;                              // what else the damage info refers to
+        for (size_t o = 0; o < 0xC0; o += 8) { uintptr_t v = Rd<uintptr_t>(info + o); if (GameObj(v)) { char b[96]; snprintf(b, sizeof b, " +%02zX=%s", o, Cls((uint8_t *)v).name.c_str()); objs += b; } }
+        void *fr[14] = {}; USHORT n = RtlCaptureStackBackTrace(1, 14, fr, nullptr); std::string st;
+        for (USHORT i = 0; i < n; ++i) { char b[32]; uintptr_t a = (uintptr_t)fr[i]; if (a > (uintptr_t)g_base && a < g_vtLo) snprintf(b, sizeof b, " %zX", a - (uintptr_t)g_base); else snprintf(b, sizeof b, " ?"); st += b; }
+        Log("    info objects:%s | EDF.dll stack:%s", objs.empty() ? " none" : objs.c_str(), st.c_str());
+    }
+    return w;
+}
+
 // ---- summary: one player's numbers, the unit sent over the network and written to reports ----
 #pragma pack(push, 1)
-struct EnemyRow { char name[64]; float dmg; uint32_t kills; };
+struct EnemyRow { char name[40]; float dmg; uint32_t kills; };
+struct WeaponRow { char name[48]; float dmg, best, peak1, peak5, active; uint32_t hits, kills; uint8_t veh; };
 struct FfRow { char cls[16]; float dmg; };
 struct Summary {
     char name[32];            // player name (UTF-8), from EDFStats.ini Name=
     char cls[16];             // Ranger / Wing Diver / Fencer / Air Raider
     float seconds;
-    float dmg, dmgVeh, best, peak1, peak5, ffNpc, taken, takenVeh, heal, healSelf, dist, distVeh;
-    float ffPlayers, selfDmg, takenFF, downSecs;
-    uint32_t revives, revived;
+    float dmg, dmgVeh, best, peak1, peak5, ffNpc, taken, takenVeh, dist, distVeh;
+    float ffPlayers, selfDmg, takenFF;
     uint32_t hits, kills, killsVeh, parts, ffKills, deaths;
-    uint8_t nEnemy; EnemyRow enemy[10];
+    uint8_t nEnemy; EnemyRow enemy[8];
     uint8_t nFfFrom; FfRow ffFrom[4];   // friendly fire this player received from other players
+    uint8_t nWeapon; WeaponRow weapon[6];
 };
 struct Packet { uint32_t magic, version, sender, seq, mission; Summary s; };
 #pragma pack(pop)
 static const uint32_t MAGIC = 0x31534445;   // "EDS1"
-static const uint32_t PROTO = 10;   // 10: enemy rows carry class names
+static const uint32_t PROTO = 11;   // 10: enemy rows carry class names; 11: per weapon rows, no healing / rescues
 
 static std::string g_name;                  // UTF-8
 static void CopyStr(char *dst, size_t n, const std::string &s) {
@@ -238,22 +354,45 @@ static Summary MakeSummary(const PStats &p, const std::string &name) {
     s.dmg = (float)p.dmg; s.dmgVeh = (float)p.dmgVeh; s.best = (float)p.best; s.peak1 = (float)p.dps.peak1;
     s.peak5 = (float)p.dps.peak5; s.ffNpc = (float)p.ffNpc; s.taken = (float)p.taken; s.takenVeh = (float)p.takenVeh;
     s.ffPlayers = (float)p.ffPlayersSeen; s.selfDmg = (float)p.selfDmg; s.takenFF = (float)p.takenFF;
-    s.revives = p.revives; s.revived = p.revived; s.downSecs = (float)p.downSecs;
     for (auto &f : p.ffFrom) {
         if (s.nFfFrom >= 4) break;
         FfRow &r = s.ffFrom[s.nFfFrom++]; CopyStr(r.cls, sizeof r.cls, f.first); r.dmg = (float)f.second;
     }
-    s.heal = (float)p.heal; s.healSelf = (float)p.healSelf; s.dist = (float)p.dist; s.distVeh = (float)p.distVeh;
+    s.dist = (float)p.dist; s.distVeh = (float)p.distVeh;
     s.hits = p.hits; s.kills = p.kills; s.killsVeh = p.killsVeh; s.parts = p.parts; s.ffKills = p.ffKills; s.deaths = p.deaths;
     std::vector<std::pair<double, std::string>> e;
     for (auto &d : p.dmgBy) e.push_back({ d.second, d.first });
     for (auto &k : p.killsBy) if (!p.dmgBy.count(k.first)) e.push_back({ 0.0, k.first });
     std::sort(e.begin(), e.end(), [](auto &a, auto &b) { return a.first > b.first; });
     for (auto &x : e) {
-        if (s.nEnemy >= 10) break;
+        if (s.nEnemy >= 8) break;
         EnemyRow &r = s.enemy[s.nEnemy++];
         CopyStr(r.name, sizeof r.name, x.second); r.dmg = (float)x.first;
         auto k = p.killsBy.find(x.second); r.kills = k != p.killsBy.end() ? k->second : 0;
+    }
+    // weapons: objects with the same name are one weapon (a weapon object can be recreated, e.g. after death)
+    struct WSum { double dmg = 0, best = 0, p1 = 0, p5 = 0, active = 0; unsigned hits = 0, kills = 0; bool veh = false; };
+    std::map<std::string, WSum> byName;
+    for (auto &w : p.weapons) {
+        WSum &t = byName[WeaponName(w.first)];
+        t.dmg += w.second.dmg; t.best = std::max(t.best, w.second.best); t.hits += w.second.hits; t.kills += w.second.kills;
+        t.p1 = std::max(t.p1, w.second.dps.peak1); t.p5 = std::max(t.p5, w.second.dps.peak5); t.active += w.second.activeSecs;
+        t.veh |= w.second.veh;
+    }
+    std::vector<std::pair<std::string, WSum>> ws(byName.begin(), byName.end());
+    std::sort(ws.begin(), ws.end(), [](auto &a, auto &b) { return a.second.dmg > b.second.dmg; });
+    if (ws.size() > 6) {                     // the rest goes into one row
+        WSum rest; for (size_t i = 5; i < ws.size(); ++i) {
+            auto &t = ws[i].second; rest.dmg += t.dmg; rest.best = std::max(rest.best, t.best); rest.hits += t.hits; rest.kills += t.kills;
+            rest.p1 = std::max(rest.p1, t.p1); rest.p5 = std::max(rest.p5, t.p5); rest.active += t.active;
+        }
+        ws.resize(5); ws.push_back({ L_(u8"Остальное оружие", u8"Other weapons"), rest });
+    }
+    for (auto &x : ws) {
+        WeaponRow &r = s.weapon[s.nWeapon++];
+        CopyStr(r.name, sizeof r.name, x.first); r.dmg = (float)x.second.dmg; r.best = (float)x.second.best;
+        r.peak1 = (float)x.second.p1; r.peak5 = (float)x.second.p5; r.active = (float)x.second.active;
+        r.hits = x.second.hits; r.kills = x.second.kills; r.veh = x.second.veh;
     }
     return s;
 }
@@ -325,7 +464,9 @@ static void OnPacket(const void *data, size_t n, const char *via) {
     Packet k; memcpy(&k, data, sizeof k);
     if (k.magic != MAGIC || k.version != PROTO || k.sender == g_self) return;
     k.s.name[sizeof k.s.name - 1] = 0; k.s.cls[sizeof k.s.cls - 1] = 0;
-    if (k.s.nEnemy > 10) k.s.nEnemy = 10;
+    if (k.s.nEnemy > 8) k.s.nEnemy = 8;
+    if (k.s.nWeapon > 6) k.s.nWeapon = 6;
+    for (auto &w : k.s.weapon) w.name[sizeof w.name - 1] = 0;
     if (k.s.nFfFrom > 4) k.s.nFfFrom = 4;
     for (auto &e : k.s.ffFrom) e.cls[sizeof e.cls - 1] = 0;
     if (!strncmp(via, "EOS", 3)) ++g_rxEos; else ++g_rxUdp;
@@ -521,9 +662,8 @@ static void WriteResults(const char *why);
 static bool g_missionEnded, g_autoBoardOnEnd = true; static uint64_t g_finalWriteMs;
 static volatile bool g_autoBoard;      // scoreboard shown by itself on the result screen
 static uint64_t g_lastLocalMs;          // last hit this machine's player took part in
-static std::map<uint8_t *, uint64_t> g_downMs;          // player soldier -> when it went down (this mission)
 static uint64_t g_lastFightMs;           // last hit any player took part in
-struct SlotInfo { uint8_t *obj = nullptr; uint64_t createdMs = 0; bool down = false; };
+struct SlotInfo { uint8_t *obj = nullptr; uint64_t createdMs = 0; };
 static std::map<unsigned, SlotInfo> g_slots;            // player slot -> its current character (cleared at mission end)
 // the game sometimes replaces this machine's player object in the middle of a mission
 // (seen 2026-11-14 about 2 min in, the other player's mission went on): keep counting on the new object
@@ -536,7 +676,7 @@ static void RebindLocal(uint8_t *local) {
 static void NewMission(uint8_t *local) {
     if (g_localSol && !g_ps.empty() && !g_missionEnded) WriteResults("new mission");
     g_missionEnded = false; g_finalWriteMs = 0;
-    g_ps.clear(); g_localSol = local; g_hitLines = 0; ++g_missionId; g_downMs.clear();
+    g_ps.clear(); g_localSol = local; g_hitLines = 0; ++g_missionId; g_weapons.clear(); g_weaponNo = 0; g_wprobeHits = 0;
     g_missionStartMs = GetTickCount64(); GetLocalTime(&g_missionStart);
     Log("---- new mission (this PC: %s) ----", local ? ClassName(Cls(local).name) : "?");
     NetSend();
@@ -566,8 +706,7 @@ static void *__fastcall hResultDtor(void *self, int flags) {
     return oResultDtor(self, flags);
 }
 
-// ---- player spawns: mission start, and a rescued player coming back -----------------------------
-static float Dist3(const float *a, const float *b) { float x = a[0] - b[0], y = a[1] - b[1], z = a[2] - b[2]; return sqrtf(x * x + y * y + z * z); }
+// ---- player spawns: mission start, and a player object replaced in the middle of a mission -------
 typedef uint8_t *(__fastcall *CreatePlayerFn)(unsigned slot, const float *where, int equip);
 static CreatePlayerFn oCreatePlayer;
 static uint8_t *__fastcall hCreatePlayer(unsigned slot, const float *where, int equip) {
@@ -577,87 +716,25 @@ static uint8_t *__fastcall hCreatePlayer(unsigned slot, const float *where, int 
     uint64_t now = GetTickCount64();
     EnterCriticalSection(&g_cs);
     const ClsInfo &ci = Cls(obj);
-    // nobody has fought for 90 s: this is a new mission (left without a result screen), not a rescue
+    // nobody has fought for 90 s: this is a new mission (left without a result screen)
     if (now - g_lastFightMs > 90000) g_slots.clear();
     SlotInfo &si = g_slots[slot];
     uint8_t *prev = si.obj;
-    bool prevDown = prev && (g_downMs.count(prev) || Rd<uint8_t>(prev + GO_DEAD));
-    Log("player spawned: slot %u %s at (%.0f %.0f %.0f) -> %p, previous %p%s", slot, ClassName(ci.name), pos[0], pos[1], pos[2],
-        obj, prev, prev ? (prevDown ? " (was down)" : " (was alive)") : "");
+    Log("player spawned: slot %u %s at (%.0f %.0f %.0f) -> %p, previous %p", slot, ClassName(ci.name), pos[0], pos[1], pos[2], obj, prev);
     if (prev && prev != obj && !g_missionEnded) {
-        // rescue: the closest other living player near the spot gets the credit
-        uint8_t *best = nullptr; float bd = 1e9f;
-        for (auto &kv : g_slots) {
-            uint8_t *o = kv.second.obj;
-            if (kv.first == slot || !o || Rd<uint8_t>(o + GO_DEAD)) continue;
-            float op[3]; if (!SafeRead(o + SB_POS, op, sizeof op)) continue;
-            float dd = Dist3(op, pos); if (dd < bd) { bd = dd; best = o; }
-        }
-        bool rescue = false;   // rescues are counted by PollRescues(); a new object here is only logged
-        (void)prevDown;
-        if (rescue) {
-            uint64_t downAt = g_downMs.count(prev) ? g_downMs[prev] : 0;
-            Log("  rescue of slot %u, nearest player %p at %.1f m%s", slot, best, bd, best == g_localSol && best ? " (this PC)" : "");
-            if (best && bd < 15.0f && best == g_localSol) ++P(best).revives;
-            if (prev == g_localSol) {
-                PStats &me = P(prev); ++me.revived;
-                if (downAt) me.downSecs += (now - downAt) / 1000.0;
-            }
-        }
         if (prev == g_localSol) RebindLocal(obj);           // keep counting on the new character
         else if (g_ps.count(prev)) { PStats moved = std::move(g_ps[prev]); g_ps.erase(prev); g_ps[obj] = std::move(moved); }
     }
-    si.obj = obj; si.createdMs = now; si.down = false;
+    si.obj = obj; si.createdMs = now;
     LeaveCriticalSection(&g_cs);
     return obj;
-}
-
-// ---- rescues: a downed player comes back on the same object (2026-11-18 test) -----------------
-// polled every 100 ms. down = dead flag set or HP <= 0; back up = neither. The closest other
-// living player gets the credit (rescuing needs standing next to the downed player).
-static const float RESCUE_RANGE = 10.0f;
-static void PollRescues() {               // caller holds g_cs
-    if (g_missionEnded || g_slots.empty()) return;
-    uint64_t now = GetTickCount64();
-    for (auto &kv : g_slots) {
-        SlotInfo &si = kv.second;
-        uint8_t *o = si.obj;
-        if (!o) continue;
-        float hp = 0; uint8_t dead = 1;
-        if (!SafeRead(o + GO_HP, &hp, sizeof hp) || !SafeRead(o + GO_DEAD, &dead, sizeof dead)) continue;
-        bool down = dead != 0 || !(hp > 0);
-        if (down && !si.down) {
-            if (!g_downMs.count(o)) g_downMs[o] = now;
-            Log("player down: slot %u %s %p (dead=%u hp=%.1f)", kv.first, ClassName(Cls(o).name), o, dead, hp);
-        } else if (!down && si.down) {
-            float pos[3] = {};
-            SafeRead(o + SB_POS, pos, sizeof pos);
-            uint8_t *best = nullptr; float bd = 1e9f;
-            for (auto &kw : g_slots) {
-                uint8_t *q = kw.second.obj;
-                if (kw.first == kv.first || !q || kw.second.down) continue;
-                float qp[3]; if (!SafeRead(q + SB_POS, qp, sizeof qp)) continue;
-                float dd = Dist3(qp, pos); if (dd < bd) { bd = dd; best = q; }
-            }
-            auto it = g_downMs.find(o);
-            uint64_t downAt = it != g_downMs.end() ? it->second : 0;
-            if (it != g_downMs.end()) g_downMs.erase(it);
-            bool credited = best && bd <= RESCUE_RANGE;
-            Log("player rescued: slot %u %s %p (hp=%.1f, down %.1f s), nearest player %p %s at %.1f m%s", kv.first,
-                ClassName(Cls(o).name), o, hp, downAt ? (now - downAt) / 1000.0 : 0.0, best,
-                best ? ClassName(Cls(best).name) : "-", bd < 1e8f ? bd : -1.0f,
-                credited ? (best == g_localSol ? " -> rescued by this PC" : " -> rescued by another player") : " -> nobody close");
-            if (credited && best == g_localSol) ++P(best).revives;
-            if (o == g_localSol) { PStats &me = P(o); ++me.revived; if (downAt) me.downSecs += (now - downAt) / 1000.0; }
-        }
-        si.down = down;
-    }
 }
 
 // ---- hook -------------------------------------------------------------------------------------
 typedef void *(__fastcall *ApplyDamageFn)(uint8_t *self, uint8_t *info);
 static ApplyDamageFn oApplyDamage;
 
+static const uint8_t *g_hitStack;        // set by hApplyDamage for the hit being handled
 static void OnHit(uint8_t *self, uint8_t *info, float hp0, float hp1, bool dead0, bool dead1, int tTeam) {
     float delta = hp0 - hp1;                                // > 0 damage, < 0 healing actually applied
     if (delta == 0 && !(dead1 && !dead0)) return;
@@ -687,6 +764,8 @@ static void OnHit(uint8_t *self, uint8_t *info, float hp0, float hp1, bool dead0
 
     int fr = Friendly(iTeam, tTeam);
     if (fr < 0) fr = (iTeam >= 0 && iTeam == tTeam) ? 1 : 0;
+    if (tc.kind == K_VEHICLE) fr = 1;        // Vehicle* objects are EDF vehicles (an empty one has no team): never an enemy
+    bool mine = who && IsLocal(who);         // weapons are told apart on the shooter's own PC
 
     if (who) {
         PStats &p = P(who);
@@ -699,11 +778,17 @@ static void OnHit(uint8_t *self, uint8_t *info, float hp0, float hp1, bool dead0
                 ++p.hits; p.dmg += delta; p.best = std::max(p.best, (double)delta); p.dps.Add(now, delta);
                 p.dmgBy[tc.name] += delta;
                 if (viaVeh) p.dmgVeh += delta;
+                bool kill = killed && !IsPart(tc.name);
                 if (killed && IsPart(tc.name)) ++p.parts;
                 else if (killed) { ++p.kills; ++p.killsBy[tc.name]; if (viaVeh) ++p.killsVeh; }
+                if (mine && g_hitStack) {
+                    g_hitOwner = viaVeh ? atk : who;
+                    uint8_t *wo = WeaponOfHit(g_hitStack, info);
+                    if (wo) Weapon(wo);                     // name it now, while the object is alive
+                    WStats &w = p.weapons[wo]; w.Add(now, delta, kill); w.veh |= viaVeh;
+                    g_hitOwner = nullptr;
+                }
             }
-        } else if (delta < 0) {
-            if (self == who) p.healSelf += -delta; else p.heal += -delta;
         } else if (killed && !fr && delta == 0) {          // kill whose HP change happened on another machine
             if (IsPart(tc.name)) ++p.parts; else { ++p.kills; ++p.killsBy[tc.name]; }
         }
@@ -713,8 +798,8 @@ static void OnHit(uint8_t *self, uint8_t *info, float hp0, float hp1, bool dead0
         if (who == victim) {}                                   // own fire: counted as selfDmg above
         else if (fr) { v.takenFF += delta; if (who) v.ffFrom[ClassName(Cls(who).name)] += delta; }
         else if (victimVeh) v.takenVeh += delta; else v.taken += delta;
-        if (killed && !victimVeh) { ++v.deaths; g_downMs[victim] = now; }
-    } else if (victim && killed && !victimVeh) { ++P(victim).deaths; g_downMs[victim] = now; }
+        if (killed && !victimVeh) ++v.deaths;
+    } else if (victim && killed && !victimVeh) ++P(victim).deaths;
 
     if (g_logHits && g_hitLines++ < 50000)
         LogHit("HIT tgt=%p %s hp %.1f->%.1f | atk=%p %s who=%p%s fr=%d raw=%.2f applied=%.2f flags=%04X%s",
@@ -728,8 +813,11 @@ static void *__fastcall hApplyDamage(uint8_t *self, uint8_t *info) {
     void *r = oApplyDamage(self, info);
     float hp1 = Rd<float>(self + GO_HP); uint8_t dead1 = Rd<uint8_t>(self + GO_DEAD);
     if (hp0 == hp1 && dead0 == dead1) return r;            // fast path: nothing changed here
+    const uint8_t *stk = (const uint8_t *)_AddressOfReturnAddress();
     EnterCriticalSection(&g_cs);
+    g_hitStack = stk;
     OnHit(self, info, hp0, hp1, dead0 != 0, dead1 != 0, tTeam);
+    g_hitStack = nullptr;
     LeaveCriticalSection(&g_cs);
     return r;
 }
@@ -785,16 +873,23 @@ static void WriteJson(const std::string &path, const std::vector<Row> &rows, con
                    "\"damageVehicle\": %.1f, \"hits\": %u, \"kills\": %u, \"killsVehicle\": %u, \"partsDestroyed\": %u, \"bestHit\": %.1f, "
                    "\"peakDps1s\": %.1f, \"peakDps5s\": %.1f, \"damageToPlayers\": %.1f, \"damageToAlliedNpc\": %.1f, "
                    "\"alliedNpcKilled\": %u, \"damageToSelf\": %.1f, \"takenFromAllies\": %.1f, \"taken\": %.1f, "
-                   "\"takenVehicle\": %.1f, \"deaths\": %u, \"heal\": %.1f, \"healSelf\": %.1f, \"distance\": %.1f, \"distanceVehicle\": %.1f, "
-                   "\"rescued\": %u, \"wasRescued\": %u, \"downSeconds\": %.1f,\n"
+                   "\"takenVehicle\": %.1f, \"deaths\": %u, \"distance\": %.1f, \"distanceVehicle\": %.1f,\n"
                    "     \"byEnemy\": [",
                 Esc(s.name, false).c_str(), Esc(s.cls, false).c_str(), rows[i].local ? "true" : "false", rows[i].partial ? "true" : "false",
                 s.seconds, s.dmg, s.dmgVeh, s.hits, s.kills, s.killsVeh, s.parts, s.best, s.peak1, s.peak5, s.ffPlayers, s.ffNpc,
                 s.ffKills, s.selfDmg, s.takenFF, s.taken,
-                s.takenVeh, s.deaths, s.heal, s.healSelf, s.dist, s.distVeh, s.revives, s.revived, s.downSecs);
+                s.takenVeh, s.deaths, s.dist, s.distVeh);
         for (int e = 0; e < s.nEnemy; ++e)
             fprintf(f, "%s{\"enemy\": \"%s\", \"class\": \"%s\", \"damage\": %.1f, \"kills\": %u}", e ? ", " : "", Esc(EnemyName(s.enemy[e].name), false).c_str(), Esc(s.enemy[e].name, false).c_str(),
                     s.enemy[e].dmg, s.enemy[e].kills);
+        fprintf(f, "],\n     \"byWeapon\": [");
+        for (int w = 0; w < s.nWeapon; ++w) {
+            const WeaponRow &x = s.weapon[w];
+            fprintf(f, "%s{\"weapon\": \"%s\", \"damage\": %.1f, \"hits\": %u, \"kills\": %u, \"bestHit\": %.1f, \"peakDps1s\": %.1f, "
+                       "\"peakDps5s\": %.1f, \"activeSeconds\": %.0f, \"avgDps\": %.1f, \"vehicle\": %s}", w ? ", " : "",
+                    Esc(x.name, false).c_str(), x.dmg, x.hits, x.kills, x.best, x.peak1, x.peak5, x.active, x.active > 0 ? x.dmg / x.active : 0.0,
+                    x.veh ? "true" : "false");
+        }
         fprintf(f, "]}%s\n", i + 1 < rows.size() ? "," : "");
     }
     fprintf(f, "  ]\n}\n");
@@ -826,7 +921,7 @@ tr:last-child td{border-bottom:0}.me td:first-child{color:var(--acc2)}.cls{color
 .bar{height:4px;background:var(--line);margin-top:4px;border-radius:2px}.bar i{display:block;height:4px;background:var(--acc);border-radius:2px}
 .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:12px 14px}.card h3{margin:0 0 8px;font-size:16px}
-.card table{min-width:0}.card td,.card th{padding:4px 6px}.card td:first-child{white-space:normal}.note{color:var(--dim);font-size:13px;margin-top:22px}.warn{color:var(--bad)}
+.cards.wide{grid-template-columns:1fr}.card table{min-width:0}.card td,.card th{padding:4px 6px}.card td:first-child{white-space:normal}.note{color:var(--dim);font-size:13px;margin-top:22px}.warn{color:var(--bad)}
 </style></head><body><main>
 )";
     head.replace(head.find("{LANG}"), 6, g_en ? "en" : "ru");
@@ -842,8 +937,6 @@ tr:last-child td{border-bottom:0}.me td:first-child{color:var(--acc2)}.cls{color
         { L_(u8"Палач — больше всего убийств", u8"Executioner — most kills"), [](const Summary &s) { return (double)s.kills; }, "" },
         { L_(u8"Пиковая мощь — урон за 1 с", u8"Peak power — damage in 1 s"), [](const Summary &s) { return (double)s.peak1; }, "" },
         { L_(u8"Самый сильный удар", u8"Biggest hit"), [](const Summary &s) { return (double)s.best; }, "" },
-        { L_(u8"Спасатель — поднял союзников", u8"Lifesaver — rescued allies"), [](const Summary &s) { return (double)s.revives; }, "" },
-        { L_(u8"Медик — лечение союзников", u8"Medic — healed allies"), [](const Summary &s) { return (double)s.heal; }, "" },
         { L_(u8"Стена — принял урона от врагов", u8"Wall — damage taken from enemies"), [](const Summary &s) { return (double)(s.taken + s.takenVeh); }, "" },
         { L_(u8"Турист — прошёл пешком", u8"Tourist — distance on foot"), [](const Summary &s) { return (double)s.dist; }, L_(u8" м", u8" m") },
         { L_(u8"Водитель — урон с техники", u8"Driver — damage from vehicles"), [](const Summary &s) { return (double)s.dmgVeh; }, "" },
@@ -867,20 +960,48 @@ tr:last-child td{border-bottom:0}.me td:first-child{color:var(--acc2)}.cls{color
 
     // main table
     fputs(L_(u8"<h2>Таблица</h2><div class=\"wrap\"><table><tr><th>Игрок</th><th>Урон</th><th>Пик DPS 1с / 5с</th><th>Убийства</th>", u8"<h2>Scoreboard</h2><div class=\"wrap\"><table><tr><th>Player</th><th>Damage</th><th>Peak DPS 1s / 5s</th><th>Kills</th>"), f);
-    fputs(L_(u8"<th>Части</th><th>Лучший удар</th><th>Получил: враги / свои</th><th>Смерти</th><th>Поднял / подняли</th><th>Лечение</th>", u8"<th>Parts</th><th>Best hit</th><th>Taken: enemies / allies</th><th>Deaths</th><th>Rescued / was rescued</th><th>Healing</th>"), f);
+    fputs(L_(u8"<th>Части</th><th>Лучший удар</th><th>Получил: враги / свои</th><th>Смерти</th>", u8"<th>Parts</th><th>Best hit</th><th>Taken: enemies / allies</th><th>Deaths</th>"), f);
     fputs(L_(u8"<th>По игрокам</th><th>По NPC</th><th>Себе</th><th>Пешком</th><th>На технике</th></tr>\n", u8"<th>To players</th><th>To NPCs</th><th>To self</th><th>On foot</th><th>In vehicles</th></tr>\n"), f);
     for (auto &r : rows) {
         const Summary &s = r.s;
         fprintf(f, "<tr%s><td>%s <span class=\"cls\">%s%s</span><div class=\"bar\"><i style=\"width:%.1f%%\"></i></div></td>",
                 r.local ? " class=\"me\"" : "", nm(r).c_str(), Esc(s.cls, true).c_str(),
                 r.partial ? L_(u8" · неполные данные", u8" · partial data") : "", 100.0 * s.dmg / top);
-        std::string rowFmt = std::string("<td>%s</td><td>%s / %s</td><td>%u</td><td>%u</td><td>%s</td><td>%s / %s</td><td>%u</td><td>%u / %u</td><td>%s</td>") + L_(u8"<td>%s</td><td>%s</td><td>%s</td><td>%s м</td><td>%s м</td></tr>\n", u8"<td>%s</td><td>%s</td><td>%s</td><td>%s m</td><td>%s m</td></tr>\n");
+        std::string rowFmt = std::string("<td>%s</td><td>%s / %s</td><td>%u</td><td>%u</td><td>%s</td><td>%s / %s</td><td>%u</td>") + L_(u8"<td>%s</td><td>%s</td><td>%s</td><td>%s м</td><td>%s м</td></tr>\n", u8"<td>%s</td><td>%s</td><td>%s</td><td>%s m</td><td>%s m</td></tr>\n");
         fprintf(f, rowFmt.c_str(),
                 Num(s.dmg).c_str(), Num(s.peak1).c_str(), Num(s.peak5).c_str(), s.kills, s.parts, Num(s.best).c_str(),
-                Num(s.taken + s.takenVeh).c_str(), Num(s.takenFF).c_str(), s.deaths, s.revives, s.revived, Num(s.heal).c_str(), Num(s.ffPlayers).c_str(),
+                Num(s.taken + s.takenVeh).c_str(), Num(s.takenFF).c_str(), s.deaths, Num(s.ffPlayers).c_str(),
                 Num(s.ffNpc).c_str(), Num(s.selfDmg).c_str(), Num(s.dist).c_str(), Num(s.distVeh).c_str());
     }
     fputs("</table></div>\n", f);
+
+    // per weapon
+    bool anyW = false; for (auto &r : rows) anyW |= r.s.nWeapon > 0;
+    if (anyW) {
+        fputs(L_(u8"<h2>По оружию</h2><div class=\"cards wide\">\n", u8"<h2>By weapon</h2><div class=\"cards wide\">\n"), f);
+        for (auto &r : rows) {
+            const Summary &s = r.s;
+            if (!s.nWeapon) continue;
+            double tot = 0; for (int w = 0; w < s.nWeapon; ++w) tot += s.weapon[w].dmg;
+            fprintf(f, "<div class=\"card\"><h3>%s <span class=\"cls\">%s</span></h3><div class=\"wrap\"><table><tr>%s</tr>", nm(r).c_str(), Esc(s.cls, true).c_str(),
+                    L_(u8"<th>Оружие</th><th>Урон</th><th>Доля</th><th>Попадания</th><th>Убийства</th><th>Лучший удар</th><th>Пик DPS 1с / 5с</th><th>DPS в бою</th><th>Время попаданий</th>",
+                       u8"<th>Weapon</th><th>Damage</th><th>Share</th><th>Hits</th><th>Kills</th><th>Best hit</th><th>Peak DPS 1s / 5s</th><th>DPS in use</th><th>Time hitting</th>"));
+            for (int w = 0; w < s.nWeapon; ++w) {
+                const WeaponRow &x = s.weapon[w];
+                fprintf(f, "<tr><td>%s%s<div class=\"bar\"><i style=\"width:%.1f%%\"></i></div></td><td>%s</td><td>%.0f%%</td><td>%s</td><td>%u</td><td>%s</td><td>%s / %s</td><td>%s</td><td>%d:%02d</td></tr>",
+                        Esc(x.name, true).c_str(), x.veh ? L_(u8" <span class=\"cls\">техника</span>", u8" <span class=\"cls\">vehicle</span>") : "",
+                        tot > 0 ? 100.0 * x.dmg / tot : 0.0, Num(x.dmg).c_str(), tot > 0 ? 100.0 * x.dmg / tot : 0.0, Num(x.hits).c_str(), x.kills,
+                        Num(x.best).c_str(), Num(x.peak1).c_str(), Num(x.peak5).c_str(), Num(x.active > 0 ? x.dmg / x.active : 0).c_str(),
+                        (int)x.active / 60, (int)x.active % 60);
+            }
+            fputs("</table></div></div>\n", f);
+        }
+        fputs("</div>\n", f);
+        fputs(L_(u8"<p class=\"note\">DPS в бою — урон оружия, делённый на время, когда оно попадало (секунды, в которые было хотя бы одно попадание). "
+                 u8"Оружие различает компьютер стрелявшего; у игроков без EDFStats этого раздела нет.</p>\n",
+                 u8"<p class=\"note\">DPS in use — the weapon's damage divided by the time it was hitting (seconds with at least one hit). "
+                 u8"Weapons are told apart by the shooter's PC; players without EDFStats have no weapon section.</p>\n"), f);
+    }
 
     // per player breakdown
     fputs(L_(u8"<h2>По врагам</h2><div class=\"cards\">\n", u8"<h2>By enemy</h2><div class=\"cards\">\n"), f);
@@ -950,12 +1071,17 @@ static void WriteResults(const char *why) {      // caller holds g_cs
         const Summary &s = r.s;
         Log("%-16s %-10s %s dmg=%.0f (vehicle %.0f) hits=%u kills=%u (vehicle %u) parts=%u best=%.0f peakDPS1s=%.0f peakDPS5s=%.0f "
             "toPlayers=%.0f toNPC=%.0f npcKilled=%u self=%.0f taken=%.0f takenInVehicle=%.0f takenFromAllies=%.0f deaths=%u "
-            "heal=%.0f healSelf=%.0f walked=%.0fm driven=%.0fm rescued=%u wasRescued=%u downTime=%.0fs",
+            "walked=%.0fm driven=%.0fm",
             s.name, s.cls, r.local ? "[this PC]" : r.partial ? "[partial]" : "[network]", s.dmg, s.dmgVeh, s.hits, s.kills,
             s.killsVeh, s.parts, s.best, s.peak1, s.peak5, s.ffPlayers, s.ffNpc, s.ffKills, s.selfDmg, s.taken, s.takenVeh,
-            s.takenFF, s.deaths, s.heal, s.healSelf, s.dist, s.distVeh, s.revives, s.revived, s.downSecs);
+            s.takenFF, s.deaths, s.dist, s.distVeh);
         for (int i = 0; i < s.nFfFrom; ++i) Log("      friendly fire received from %s: %.0f", s.ffFrom[i].cls, s.ffFrom[i].dmg);
         for (int e = 0; e < s.nEnemy; ++e) Log("      %-40s dmg %8.0f  kills %u", EnemyName(s.enemy[e].name).c_str(), s.enemy[e].dmg, s.enemy[e].kills);
+        for (int w = 0; w < s.nWeapon; ++w) {
+            const WeaponRow &x = s.weapon[w];
+            Log("      weapon %-34s dmg %8.0f  hits %u  kills %u  best %.0f  peakDPS1s %.0f  peakDPS5s %.0f  hitting %.0fs  avgDPS %.0f%s", x.name, x.dmg,
+                x.hits, x.kills, x.best, x.peak1, x.peak5, x.active, x.active > 0 ? x.dmg / x.active : 0.0, x.veh ? "  (vehicle)" : "");
+        }
     }
     Log("==== END ==== (packets: EOS sent %u received %u, UDP sent %u received %u)", g_txEos, g_rxEos, g_txUdp, g_rxUdp);
 
@@ -996,7 +1122,7 @@ static DWORD WINAPI Worker(LPVOID) {
         bool k1 = (GetAsyncKeyState(g_dumpKey) & 0x8000) != 0, k2 = (GetAsyncKeyState(g_resetKey) & 0x8000) != 0;
         EnterCriticalSection(&g_cs);
         NetReceive();
-        if (now - lastPos >= 100) { SampleDistance(); PollRescues(); lastPos = now; }
+        if (now - lastPos >= 100) { SampleDistance(); lastPos = now; }
         if (now - lastName >= 5000) { SteamName(); lastName = now; }
         if (now - lastSend >= (uint64_t)g_sendMs) { NetSend(); lastSend = now; }
         if (k1 && !d1) { NetSend(); WriteResults("F9"); fflush(g_log); }
@@ -1062,6 +1188,7 @@ extern "C" __declspec(dllexport) bool EDFMLAPI EML6_Load(PluginInfo *info) {
     if (g_log) setvbuf(g_log, nullptr, _IOFBF, 1 << 16);
     const char *ini = iniPath.c_str();
     g_logHits = GetPrivateProfileIntA("EDFStats", "LogHits", 0, ini);
+    g_wprobe = GetPrivateProfileIntA("EDFStats", "WeaponProbe", 1, ini) != 0;
     g_dumpKey = GetPrivateProfileIntA("EDFStats", "SummaryKey", VK_F9, ini);
     g_resetKey = GetPrivateProfileIntA("EDFStats", "ResetKey", VK_F10, ini);
     g_port = GetPrivateProfileIntA("EDFStats", "Port", 27787, ini);
@@ -1078,7 +1205,7 @@ extern "C" __declspec(dllexport) bool EDFMLAPI EML6_Load(PluginInfo *info) {
     LARGE_INTEGER q; QueryPerformanceCounter(&q);
     g_self = (uint32_t)(q.QuadPart ^ GetCurrentProcessId() ^ (q.QuadPart >> 32));
     if (!g_self) g_self = 1;
-    Log("EDFStats %s loaded; name='%s' LogHits=%d", VERSION, g_name.c_str(), g_logHits);
+    Log("EDFStats %s loaded; name='%s' LogHits=%d WeaponProbe=%d", VERSION, g_name.c_str(), g_logHits, (int)g_wprobe);
 
     char peers[1024];
     GetPrivateProfileStringA("EDFStats", "Peers", "", peers, sizeof peers, ini);
@@ -1094,6 +1221,13 @@ extern "C" __declspec(dllexport) bool EDFMLAPI EML6_Load(PluginInfo *info) {
     HMODULE edf = GetModuleHandleW(L"EDF.dll");
     if (!edf) { Log("EDF.dll not found"); return false; }
     g_base = (uint8_t *)edf;
+    {   // .rdata range: a pointer whose first qword points there is a game object with a vtable
+        auto nt = (IMAGE_NT_HEADERS *)(g_base + ((IMAGE_DOS_HEADER *)g_base)->e_lfanew);
+        auto sec = IMAGE_FIRST_SECTION(nt);
+        for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i)
+            if (!memcmp(sec[i].Name, ".rdata", 6)) { g_vtLo = (uintptr_t)g_base + sec[i].VirtualAddress; g_vtHi = g_vtLo + sec[i].Misc.VirtualSize; }
+        if (!g_vtLo) Log("WARNING: .rdata not found, weapons are not told apart");
+    }
     uint8_t *t = Scan(SIG_APPLY_DAMAGE);
     if (!t && (t = Scan(SIG_APPLY_DAMAGE, true))) Log("ApplyDamage already hooked by another plugin, chaining");
     if (!t) { Log("ERROR: ApplyDamage signature not found (different EDF.dll build?)"); return false; }
@@ -1115,8 +1249,8 @@ extern "C" __declspec(dllexport) bool EDFMLAPI EML6_Load(PluginInfo *info) {
     uint8_t *cp = Scan(SIG_CREATE_PLAYER);
     if (!cp) cp = Scan(SIG_CREATE_PLAYER, true);
     if (cp && MH_CreateHook(cp, (void *)hCreatePlayer, (void **)&oCreatePlayer) == MH_OK && MH_EnableHook(cp) == MH_OK)
-        Log("player spawn tracking on (rescues)");
-    else Log("WARNING: player spawn function not found, rescues are not counted");
+        Log("player spawn tracking on");
+    else Log("WARNING: player spawn function not found");
     uint8_t *rd = Scan(SIG_RESULT_DTOR);
     if (!rd) rd = Scan(SIG_RESULT_DTOR, true);
     if (!rd || MH_CreateHook(rd, (void *)hResultDtor, (void **)&oResultDtor) != MH_OK || MH_EnableHook(rd) != MH_OK)
