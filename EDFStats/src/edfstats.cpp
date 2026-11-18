@@ -40,7 +40,7 @@
 #include "MinHook.h"
 #pragma comment(lib, "ws2_32.lib")
 
-static const char *VERSION = "0.10";
+static const char *VERSION = "0.11";
 // ---- language: Russian for ru/uk/be/kk Windows, English otherwise; EDFStats.ini Language=auto|ru|en overrides
 static bool g_en = false;
 static inline const char *L_(const char *ru, const char *en) { return g_en ? en : ru; }
@@ -112,7 +112,10 @@ static const ClsInfo &Cls(const uint8_t *obj) {
     if (n == "AssultSoldier" || n == "PaleWing" || n == "HeavyArmor" || n == "Engineer") ci.kind = K_SOLDIER;
     else if (n.compare(0, 7, "Vehicle") == 0) ci.kind = K_VEHICLE;
     else if (n.compare(0, 7, "Weapon_") == 0) ci.kind = K_WEAPON;                       // Weapon_BasicShoot, Weapon_VehicleShoot ...
-    else if (n.find("Bullet") != std::string::npos && n.find('@') == std::string::npos) ci.kind = K_BULLET;  // SolidBullet01 ...
+    else if (n.find("Bullet") != std::string::npos && n.find('@') == std::string::npos && n.find("System") == std::string::npos &&
+             n.find("Listener") == std::string::npos && n.find("Collision") == std::string::npos && n.find("Model") == std::string::npos &&
+             n.find("Table") == std::string::npos && n.find("Manager") == std::string::npos && n.find("Mark") == std::string::npos)
+        ci.kind = K_BULLET;                                                              // SolidBullet01, MissileBullet01 ...
     return g_cls.emplace(vt, ci).first->second;
 }
 static const char *ClassName(const std::string &c) {
@@ -272,6 +275,7 @@ static const WInfo &Weapon(uint8_t *w) {
     auto it = g_weapons.find(w);
     if (it != g_weapons.end()) return it->second;
     WInfo wi;
+    { std::string n0 = ReadWStr((const void *)Rd<uintptr_t>(w + 0x1B0)); if (LooksLikeName(n0)) wi.name = n0; }   // the weapon's name (2026-11-18 log)
     for (size_t o = 0; o < 0x1800 && wi.name.empty(); o += 8) {          // a name the HUD would show
         uintptr_t q = Rd<uintptr_t>(w + o);
         std::string c = (q >= 0x10000 && q <= 0x7FFFFFFFFFFFull) ? ReadWStr((const void *)q) : "";
@@ -287,35 +291,112 @@ static const WInfo &Weapon(uint8_t *w) {
 }
 static std::string WeaponName(uint8_t *w) { return w ? Weapon(w).name : L_(u8"Не определено", u8"Not recognised"); }
 // stack: address of the hook's return address; the callers' frames are above it
-static uint8_t *WeaponOfHit(const uint8_t *stack, const uint8_t *info) {
+// The weapons of a shooter (soldier or vehicle) and the values that only one of them holds
+// (its bullet factory, parameter blocks ...). A bullet, a bullet record of BulletMtSystem or the damage
+// info usually refers to one of those, which tells the weapon even when nothing points to it directly
+// (2026-11-18 test: bullets do not point to their weapon; vehicle weapons sit on the stack).
+static bool HeapPtr(uintptr_t v) { return v >= 0x10000 && v <= 0x7FFFFFFFFFFFull && !(v & 7); }
+struct WIdx { std::vector<uint8_t *> list; std::unordered_map<uintptr_t, uint8_t *> uniq; uint64_t builtMs = 0; };
+static std::unordered_map<uint8_t *, WIdx> g_widx;          // shooter -> its weapons (this mission)
+static const size_t W_SPAN = 0x1800;                        // bytes of a weapon object that are looked at
+static void AddWeapon(std::vector<uint8_t *> &out, uintptr_t v) {
+    Kind k; if (GameObj(v, &k) && k == K_WEAPON && std::find(out.begin(), out.end(), (uint8_t *)v) == out.end()) out.push_back((uint8_t *)v);
+}
+static WIdx &WeaponsOf(uint8_t *owner, uint64_t now, bool force = false) {
+    WIdx &x = g_widx[owner];
+    if (x.builtMs && now - x.builtMs < (force ? 500u : 3000u)) return x;
+    x.builtMs = now;
+    std::vector<uint8_t *> found;
+    for (size_t o = 0; o < 0x2400; o += 8) {                // the owner object and arrays it points to
+        uintptr_t v = Rd<uintptr_t>(owner + o);
+        if (!HeapPtr(v)) continue;
+        Kind k; if (GameObj(v, &k)) { if (k == K_WEAPON) AddWeapon(found, v); continue; }
+        uintptr_t arr[16]; if (SafeRead((const void *)v, arr, sizeof arr)) for (uintptr_t a : arr) AddWeapon(found, a);
+    }
+    for (uint8_t *w : x.list) if (std::find(found.begin(), found.end(), w) == found.end() && GameObj((uintptr_t)w)) found.push_back(w);   // seen on the stack before
+    bool changed = found != x.list;
+    x.list = found;
+    std::unordered_map<uintptr_t, int> cnt; std::unordered_map<uintptr_t, uint8_t *> who;
+    for (uint8_t *w : x.list) {
+        std::set<uintptr_t> mine;
+        for (size_t o = 0; o < W_SPAN; o += 8) {
+            uintptr_t v = Rd<uintptr_t>(w + o);
+            if (!HeapPtr(v) || (uint8_t *)v == owner || (v >= (uintptr_t)w && v < (uintptr_t)w + W_SPAN)) continue;
+            if (!GameObj(v)) continue;                // only game objects (bullet factory, model ...): plain values match by chance
+            if (mine.insert(v).second) { ++cnt[v]; who[v] = w; }
+        }
+    }
+    x.uniq.clear();
+    for (auto &c : cnt) if (c.second == 1) x.uniq[c.first] = who[c.first];
+    if (changed && g_wprobe) {
+        Log("probe: %s %p has %zu weapon(s), %zu values unique to one weapon", Cls(owner).name.c_str(), owner, x.list.size(), x.uniq.size());
+        for (uint8_t *w : x.list) Log("    weapon %p %s \"%s\"", w, Cls(w).name.c_str(), Weapon(w).name.c_str());
+    }
+    return x;
+}
+// which of the shooter's weapons does value v belong to: the weapon itself, a pointer into it, or a value only it holds
+static uint8_t *WeaponOfValue(const WIdx &x, uintptr_t v, const char **how) {
+    for (uint8_t *w : x.list) {
+        if ((uint8_t *)v == w) { *how = "weapon"; return w; }
+        if (v > (uintptr_t)w && v < (uintptr_t)w + W_SPAN) { *how = "inside weapon"; return w; }
+    }
+    auto it = x.uniq.find(v); if (it != x.uniq.end()) { *how = "value of weapon"; return it->second; }
+    return nullptr;
+}
+// stack: address of the hook's return address; the callers' frames are above it. Closest evidence wins.
+static uint8_t *WeaponOfHit(const uint8_t *stack, const uint8_t *info, uint8_t *shooter, uint64_t now, bool retry = false) {
+    WIdx &x = WeaponsOf(shooter, now, retry);
     ULONG_PTR lo = 0, hi = 0; GetCurrentThreadStackLimits(&lo, &hi);
-    const uint8_t *end = stack + 0x2000; if (hi && end > (const uint8_t *)hi) end = (const uint8_t *)hi;
-    // the closest one wins: a weapon object, or a bullet object that points to its weapon
-    // (frames further up belong to the game loop and may hold unrelated weapons / bullets)
-    uint8_t *weapon = nullptr, *bullet = nullptr, *fromBullet = nullptr; long wOff = -1, bOff = -1, fbOff = -1;
-    for (const uint8_t *q = stack; q + 8 <= end && !weapon && !fromBullet; q += 8) {
+    const uint8_t *end = stack + 0x1000; if (hi && end > (const uint8_t *)hi) end = (const uint8_t *)hi;
+    uint8_t *w = nullptr; const char *how = ""; char where[96] = "";
+    // 1) the damage info itself
+    for (size_t o = 0; o < 0xC0 && !w; o += 8)
+        if ((w = WeaponOfValue(x, Rd<uintptr_t>(info + o), &how))) snprintf(where, sizeof where, "info+%zX", o);
+    // 2) stack slots, and the records / objects they point to (bullets, BulletMtSystem entries ...)
+    int reads = 0;
+    for (const uint8_t *q = stack; q + 8 <= end && !w; q += 8) {
         uintptr_t v = *(const uintptr_t *)q;
-        Kind k; if (!GameObj(v, &k)) continue;
-        if (k == K_WEAPON) { weapon = (uint8_t *)v; wOff = (long)(q - stack); }
-        else if (k == K_BULLET && (uint8_t *)v != bullet) {
-            if (!bullet) { bullet = (uint8_t *)v; bOff = (long)(q - stack); }
-            for (size_t o = 0; o < 0xC00; o += 8) {
-                uintptr_t x = Rd<uintptr_t>((uint8_t *)v + o); Kind kx;
-                if (GameObj(x, &kx) && kx == K_WEAPON) { fromBullet = (uint8_t *)x; fbOff = (long)o; bullet = (uint8_t *)v; bOff = (long)(q - stack); break; }
+        if (!HeapPtr(v)) continue;
+        Kind k = K_OTHER; bool obj = GameObj(v, &k);
+        if (obj && k == K_WEAPON) {                               // a weapon right on the stack (vehicle weapons do this)
+            w = (uint8_t *)v; how = "weapon on stack"; snprintf(where, sizeof where, "stack+%lX", (long)(q - stack));
+            if (std::find(x.list.begin(), x.list.end(), w) == x.list.end()) { x.list.push_back(w); x.builtMs = 0; }
+            break;
+        }
+        if ((w = WeaponOfValue(x, v, &how))) { snprintf(where, sizeof where, "stack+%lX", (long)(q - stack)); break; }
+        if (obj && k != K_BULLET) continue;                      // other game objects (soldiers, enemies, systems) are skipped
+        if (reads++ >= 48) continue;
+        uintptr_t rec[0x100]; size_t n = sizeof rec;              // 0x800 bytes of the record / bullet
+        if (!SafeRead((const void *)v, rec, n)) { n = 0x100; if (!SafeRead((const void *)v, rec, n)) continue; }
+        if (!obj) {                                               // plain memory: only a record of this shooter's bullet
+            bool own = false;
+            for (size_t i = 0; i < n / 8 && !own; ++i) own = (uint8_t *)rec[i] == shooter || (g_localSol && (uint8_t *)rec[i] == g_localSol);
+            if (!own) continue;
+        }
+        for (size_t i = 0; i < n / 8; ++i) {
+            Kind kr;
+            if (!WeaponOfValue(x, rec[i], &how) && GameObj(rec[i], &kr) && kr == K_WEAPON) {   // a direct link to a weapon not listed yet
+                x.list.push_back((uint8_t *)rec[i]); x.builtMs = 0;
+            }
+            if ((w = WeaponOfValue(x, rec[i], &how))) {
+                snprintf(where, sizeof where, "stack+%lX -> %s+%zX", (long)(q - stack), obj ? Cls((uint8_t *)v).name.c_str() : "record", i * 8);
+                break;
             }
         }
     }
-    uint8_t *w = fromBullet ? fromBullet : weapon;
-    if (g_wprobe && g_wprobeHits < 60) {
+    if (!w && !retry && now - x.builtMs >= 500) return WeaponOfHit(stack, info, shooter, now, true);   // weapons changed? look again
+    if (g_wprobe && g_wprobeHits < 80) {
         ++g_wprobeHits;
-        Log("probe hit: stack weapon %p %s (+%lX), bullet %p %s (+%lX) -> its weapon %p (+%lX) => %s", weapon,
-            weapon ? Cls(weapon).name.c_str() : "-", wOff, bullet, bullet ? Cls(bullet).name.c_str() : "-", bOff, fromBullet, fbOff,
-            WeaponName(w).c_str());
-        std::string objs;                              // what else the damage info refers to
-        for (size_t o = 0; o < 0xC0; o += 8) { uintptr_t v = Rd<uintptr_t>(info + o); if (GameObj(v)) { char b[96]; snprintf(b, sizeof b, " +%02zX=%s", o, Cls((uint8_t *)v).name.c_str()); objs += b; } }
-        void *fr[14] = {}; USHORT n = RtlCaptureStackBackTrace(1, 14, fr, nullptr); std::string st;
-        for (USHORT i = 0; i < n; ++i) { char b[32]; uintptr_t a = (uintptr_t)fr[i]; if (a > (uintptr_t)g_base && a < g_vtLo) snprintf(b, sizeof b, " %zX", a - (uintptr_t)g_base); else snprintf(b, sizeof b, " ?"); st += b; }
-        Log("    info objects:%s | EDF.dll stack:%s", objs.empty() ? " none" : objs.c_str(), st.c_str());
+        Log("probe hit by %s: %s via %s (%s); shooter has %zu weapon(s)", Cls(shooter).name.c_str(), WeaponName(w).c_str(), where[0] ? where : "-",
+            how[0] ? how : "no match", x.list.size());
+        if (!w) {                                                  // what was there instead
+            std::string objs;
+            for (const uint8_t *q = stack; q + 8 <= end && objs.size() < 600; q += 8) {
+                uintptr_t v = *(const uintptr_t *)q; Kind k;
+                if (GameObj(v, &k)) { char b[96]; snprintf(b, sizeof b, " +%lX=%s", (long)(q - stack), Cls((uint8_t *)v).name.c_str()); objs += b; }
+            }
+            Log("    stack objects:%s", objs.empty() ? " none" : objs.c_str());
+        }
     }
     return w;
 }
@@ -676,7 +757,7 @@ static void RebindLocal(uint8_t *local) {
 static void NewMission(uint8_t *local) {
     if (g_localSol && !g_ps.empty() && !g_missionEnded) WriteResults("new mission");
     g_missionEnded = false; g_finalWriteMs = 0;
-    g_ps.clear(); g_localSol = local; g_hitLines = 0; ++g_missionId; g_weapons.clear(); g_weaponNo = 0; g_wprobeHits = 0;
+    g_ps.clear(); g_localSol = local; g_hitLines = 0; ++g_missionId; g_weapons.clear(); g_widx.clear(); g_weaponNo = 0; g_wprobeHits = 0;
     g_missionStartMs = GetTickCount64(); GetLocalTime(&g_missionStart);
     Log("---- new mission (this PC: %s) ----", local ? ClassName(Cls(local).name) : "?");
     NetSend();
@@ -783,9 +864,9 @@ static void OnHit(uint8_t *self, uint8_t *info, float hp0, float hp1, bool dead0
                 else if (killed) { ++p.kills; ++p.killsBy[tc.name]; if (viaVeh) ++p.killsVeh; }
                 if (mine && g_hitStack) {
                     g_hitOwner = viaVeh ? atk : who;
-                    uint8_t *wo = WeaponOfHit(g_hitStack, info);
+                    uint8_t *wo = WeaponOfHit(g_hitStack, info, g_hitOwner, now);
                     if (wo) Weapon(wo);                     // name it now, while the object is alive
-                    WStats &w = p.weapons[wo]; w.Add(now, delta, kill); w.veh |= viaVeh;
+                    WStats &w = p.weapons[wo]; w.Add(now, delta, kill); if (wo) w.veh |= viaVeh;
                     g_hitOwner = nullptr;
                 }
             }

@@ -10,7 +10,7 @@ import hashlib, json, os
 REPO = "don-pardon42/edf6-mods"
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODS = [
-    {"id": "EDFStats", "version": "0.10", "tag": "edfstats-v0.10",
+    {"id": "EDFStats", "version": "0.11", "tag": "edfstats-v0.11",
      "description": "Статистика игроков в кооперативе: урон, DPS, убийства, урон по своим, урон и DPS по каждому оружию. Окно в игре (F6/F7) и HTML-отчёт после миссии.",
      "description_en": "Co-op player statistics: damage, DPS, kills, friendly fire, damage and DPS per weapon. In-game overlay (F6/F7) and an HTML report after each mission.",
      "files": ["EDFStats.dll", "EDFStats.ini"], "log": "EDFStats.log", "report": "EDFStats\\latest.html"},

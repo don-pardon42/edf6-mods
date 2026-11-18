@@ -10,10 +10,10 @@ static void *__fastcall FakeApply(uint8_t *self, uint8_t *info) {
     if (hp <= 0) { hp = 0; self[GO_DEAD] = 1; }
     memcpy(self + GO_HP, &hp, 4); return nullptr;
 }
-static uint8_t *me, *w1, *w2, *w3, *b1, *b0;   // globals: not on main's stack, like the game's heap objects
+static uint8_t *me, *w1, *w2, *w3, *b1, *b0, *fw[4], *fac[4], *dev; static uintptr_t g_infoExtra;   // globals: not on main's stack, like the game's heap objects
 static uint8_t *Enemy(float hp) { uint8_t *e = Obj(3); memcpy(e + GO_HP, &hp, 4); int32_t t = 1; memcpy(e + GO_TEAM, &t, 4); return e; }
 static uint8_t *Info(float dmg) {
-    uint8_t *i = (uint8_t *)calloc(1, 0x100); *(uint8_t **)(i + DI_ATTACKER) = me; memcpy(i + DI_DAMAGE, &dmg, 4);
+    uint8_t *i = (uint8_t *)calloc(1, 0x100); *(uint8_t **)(i + DI_ATTACKER) = me; memcpy(i + DI_DAMAGE, &dmg, 4); *(uintptr_t *)(i + 0xB0) = g_infoExtra;
     return i;
 }
 // the "bullet code": keeps its objects in its own frame while the damage is applied
@@ -33,7 +33,7 @@ int main(int argc, char **argv) {
     g_vtLo = (uintptr_t)fakeRdata; g_vtHi = (uintptr_t)(fakeRdata + 64); g_base = (uint8_t *)1;
     g_cls[VT(0)] = { "Weapon_BasicShoot", K_WEAPON }; g_cls[VT(1)] = { "SolidBullet01", K_BULLET };
     g_cls[VT(2)] = { "Engineer", K_SOLDIER };          g_cls[VT(3)] = { "EDF6_GiantAnt", K_OTHER };
-    g_cls[VT(4)] = { "Weapon_HeavyShoot", K_WEAPON };
+    g_cls[VT(4)] = { "Weapon_HeavyShoot", K_WEAPON }; g_cls[VT(5)] = { "Factory@SolidBullet01", K_OTHER };
     me = Obj(2); *(void **)(me + SB_NETPLAYER) = me; *(void **)(me + SB_CTRL) = me;   // local player
 
     // weapon 1 carries its name (pointer to a UTF-16 string), weapon 2 and 3 have none
@@ -44,6 +44,7 @@ int main(int argc, char **argv) {
     b1 = Obj(1); *(uint8_t **)(b1 + 0x2A0) = w1;     // bullet -> its weapon
     b0 = Obj(1);                                     // a bullet without a weapon link (e.g. a support unit's)
 
+    printf("me %p w1 %p w2 %p w3 %p b1 %p b0 %p\n", me, w1, w2, w3, b1, b0);
     EnterCriticalSection(&g_cs); NewMission(me); LeaveCriticalSection(&g_cs);
     // 1) bullet of weapon 1 on the stack, an unrelated weapon further up: the closer bullet wins
     Hit(b1, w2, 100); Hit(b0, b1, 50);
@@ -59,11 +60,32 @@ int main(int argc, char **argv) {
     // 4) only a bullet without a weapon link -> 'not recognised'
     Hit(b0, nullptr, 40);
     printf("4) unknown dmg=%.0f (expect 40)\n", W(nullptr) ? W(nullptr)->dmg : -1);
+    // Fencer-like setup: four weapons in an array the soldier points to, each with its own bullet factory
+    // (+0x7F8) and its name at +0x1B0; all share a device pointer (+0x2E0), which tells nothing
+    {   uint8_t **arr = (uint8_t **)calloc(8, 8); *(uint8_t ***)(me + 0x1950) = arr; dev = (uint8_t *)calloc(1, 64);
+        static const wchar_t *nm[4] = { L"Пушка Арбалет", L"Щит ДВ", L"Гатлинг ДМ", L"Ракеты Сокол" };
+        for (int i = 0; i < 4; ++i) {
+            fw[i] = Obj(4); fac[i] = Obj(5); arr[i] = fw[i];
+            *(uint8_t **)(fw[i] + 0x7F8) = fac[i]; *(uint8_t **)(fw[i] + 0x2E0) = dev; *(const wchar_t **)(fw[i] + 0x1B0) = nm[i];
+        } }
+    g_widx.clear();                                  // the game rebuilds the list every 3 s; here at once
+    // 6) a bullet object that points only to its weapon's factory (and the shared device)
+    { uint8_t *bf = Obj(1); *(uint8_t **)(bf + 0x48) = dev; *(uint8_t **)(bf + 0x40) = fac[1]; Hit(bf, nullptr, 11); }
+    // 7) a BulletMtSystem record (plain memory, no vtable) that points to the factory of weapon 3
+    { uint8_t *rec = (uint8_t *)calloc(1, 0x200); *(uint8_t **)(rec + 0x18) = dev; *(uint8_t **)(rec + 0x110) = fac[2]; *(uint8_t **)(rec + 0x20) = me; Hit(rec, nullptr, 13); }
+    // 8) a record with a pointer into weapon 4 (a sub-object)
+    { uint8_t *rec = (uint8_t *)calloc(1, 0x200); *(uint8_t **)(rec + 0x30) = fw[3] + 0x1650; *(uint8_t **)(rec + 0x8) = me; Hit(rec, nullptr, 17); }
+    // 9) the damage info refers to weapon 1's factory
+    g_infoExtra = (uintptr_t)fac[0]; Hit(nullptr, nullptr, 19); g_infoExtra = 0;
+    printf("6-9) %s=%.0f %s=%.0f %s=%.0f %s=%.0f (expect 19 11 13 17)\n", WeaponName(fw[0]).c_str(), W(fw[0]) ? W(fw[0])->dmg : -1,
+           WeaponName(fw[1]).c_str(), W(fw[1]) ? W(fw[1])->dmg : -1, WeaponName(fw[2]).c_str(), W(fw[2]) ? W(fw[2])->dmg : -1,
+           WeaponName(fw[3]).c_str(), W(fw[3]) ? W(fw[3])->dmg : -1);
+
     // 5) totals agree, summary rows, report
     double sum = 0; for (auto &kv : P(me).weapons) sum += kv.second.dmg;
     EnterCriticalSection(&g_cs);
     Summary s = MakeSummary(P(me), "Tester");
-    printf("5) player dmg=%.0f sum over weapons=%.0f rows=%u first='%s' %.0f (expect equal, 4 rows, the 700 weapon first)\n",
+    printf("5) player dmg=%.0f sum over weapons=%.0f rows=%u first='%s' %.0f (expect equal, 6 rows incl. 'other', the 700 weapon first)\n",
            P(me).dmg, sum, s.nWeapon, s.weapon[0].name, s.weapon[0].dmg);
     printf("   packet %zu bytes (EOS limit 1170)\n", sizeof(Packet));
     WriteResults("test");
