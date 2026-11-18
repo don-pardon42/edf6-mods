@@ -40,7 +40,7 @@
 #include "MinHook.h"
 #pragma comment(lib, "ws2_32.lib")
 
-static const char *VERSION = "0.11";
+static const char *VERSION = "0.12";
 // ---- language: Russian for ru/uk/be/kk Windows, English otherwise; EDFStats.ini Language=auto|ru|en overrides
 static bool g_en = false;
 static inline const char *L_(const char *ru, const char *en) { return g_en ? en : ru; }
@@ -300,7 +300,9 @@ struct WIdx { std::vector<uint8_t *> list; std::unordered_map<uintptr_t, uint8_t
 static std::unordered_map<uint8_t *, WIdx> g_widx;          // shooter -> its weapons (this mission)
 static const size_t W_SPAN = 0x1800;                        // bytes of a weapon object that are looked at
 static void AddWeapon(std::vector<uint8_t *> &out, uintptr_t v) {
-    Kind k; if (GameObj(v, &k) && k == K_WEAPON && std::find(out.begin(), out.end(), (uint8_t *)v) == out.end()) out.push_back((uint8_t *)v);
+    Kind k; if (!GameObj(v, &k) || k != K_WEAPON || std::find(out.begin(), out.end(), (uint8_t *)v) != out.end()) return;
+    if (Cls((uint8_t *)v).name == "Weapon_Accessory") return;      // Fencer's add-on equipment never fires
+    out.push_back((uint8_t *)v);
 }
 static WIdx &WeaponsOf(uint8_t *owner, uint64_t now, bool force = false) {
     WIdx &x = g_widx[owner];
@@ -336,10 +338,14 @@ static WIdx &WeaponsOf(uint8_t *owner, uint64_t now, bool force = false) {
 }
 // which of the shooter's weapons does value v belong to: the weapon itself, a pointer into it, or a value only it holds
 static uint8_t *WeaponOfValue(const WIdx &x, uintptr_t v, const char **how) {
+    // weapon objects lie next to each other (2026-11-18: 0x1710 apart), so a pointer into one belongs to the
+    // closest weapon below it, not to the first one whose span covers it
+    uint8_t *best = nullptr;
     for (uint8_t *w : x.list) {
         if ((uint8_t *)v == w) { *how = "weapon"; return w; }
-        if (v > (uintptr_t)w && v < (uintptr_t)w + W_SPAN) { *how = "inside weapon"; return w; }
+        if (v > (uintptr_t)w && v < (uintptr_t)w + W_SPAN && (!best || w > best)) best = w;
     }
+    if (best) { *how = "inside weapon"; return best; }
     auto it = x.uniq.find(v); if (it != x.uniq.end()) { *how = "value of weapon"; return it->second; }
     return nullptr;
 }
@@ -372,20 +378,28 @@ static uint8_t *WeaponOfHit(const uint8_t *stack, const uint8_t *info, uint8_t *
             bool own = false;
             for (size_t i = 0; i < n / 8 && !own; ++i) own = (uint8_t *)rec[i] == shooter || (g_localSol && (uint8_t *)rec[i] == g_localSol);
             if (!own) continue;
+            // a record that refers to two different weapons is a weapon list / weapon set, not a bullet
+            uint8_t *first = nullptr; bool many = false; const char *hw;
+            for (size_t i = 0; i < n / 8 && !many; ++i) { uint8_t *ww = WeaponOfValue(x, rec[i], &hw); if (ww) { if (first && ww != first) many = true; first = ww; } }
+            if (many) continue;
         }
         for (size_t i = 0; i < n / 8; ++i) {
             Kind kr;
-            if (!WeaponOfValue(x, rec[i], &how) && GameObj(rec[i], &kr) && kr == K_WEAPON) {   // a direct link to a weapon not listed yet
+            if (obj && !WeaponOfValue(x, rec[i], &how) && GameObj(rec[i], &kr) && kr == K_WEAPON) {   // a bullet's direct link to a weapon not listed yet
                 x.list.push_back((uint8_t *)rec[i]); x.builtMs = 0;
             }
-            if ((w = WeaponOfValue(x, rec[i], &how))) {
+            uint8_t *cand = WeaponOfValue(x, rec[i], &how);
+            if (cand && !obj && (uintptr_t)cand == rec[i]) cand = nullptr;   // plain records: a bare weapon pointer proves nothing
+            if ((w = cand)) {
                 snprintf(where, sizeof where, "stack+%lX -> %s+%zX", (long)(q - stack), obj ? Cls((uint8_t *)v).name.c_str() : "record", i * 8);
                 break;
             }
         }
     }
     if (!w && !retry && now - x.builtMs >= 500) return WeaponOfHit(stack, info, shooter, now, true);   // weapons changed? look again
-    if (g_wprobe && g_wprobeHits < 80) {
+    static std::unordered_map<uint8_t *, int> probeBudget;        // first 12 hits of every weapon, and of "none"
+    if (g_wprobeHits == 0) probeBudget.clear();
+    if (g_wprobe && g_wprobeHits < 600 && probeBudget[w]++ < 12) {
         ++g_wprobeHits;
         Log("probe hit by %s: %s via %s (%s); shooter has %zu weapon(s)", Cls(shooter).name.c_str(), WeaponName(w).c_str(), where[0] ? where : "-",
             how[0] ? how : "no match", x.list.size());

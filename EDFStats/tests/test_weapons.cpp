@@ -10,7 +10,8 @@ static void *__fastcall FakeApply(uint8_t *self, uint8_t *info) {
     if (hp <= 0) { hp = 0; self[GO_DEAD] = 1; }
     memcpy(self + GO_HP, &hp, 4); return nullptr;
 }
-static uint8_t *me, *w1, *w2, *w3, *b1, *b0, *fw[4], *fac[4], *dev; static uintptr_t g_infoExtra;   // globals: not on main's stack, like the game's heap objects
+static uint8_t * volatile b1; static uint8_t * volatile b0;   // volatile: main must not keep them in a saved register
+static uint8_t *me, *w1, *w2, *w3, *fw[4], *fac[4], *dev; static uintptr_t g_infoExtra;   // globals: not on main's stack, like the game's heap objects
 static uint8_t *Enemy(float hp) { uint8_t *e = Obj(3); memcpy(e + GO_HP, &hp, 4); int32_t t = 1; memcpy(e + GO_TEAM, &t, 4); return e; }
 static uint8_t *Info(float dmg) {
     uint8_t *i = (uint8_t *)calloc(1, 0x100); *(uint8_t **)(i + DI_ATTACKER) = me; memcpy(i + DI_DAMAGE, &dmg, 4); *(uintptr_t *)(i + 0xB0) = g_infoExtra;
@@ -24,6 +25,8 @@ __declspec(noinline) static void HitFrom(uint8_t *a, uint8_t *b, uint8_t *target
     keep[3] = keep[0];
 }
 static void Hit(uint8_t *a, uint8_t *b, float dmg, float enemyHp = 1000) { HitFrom(a, b, Enemy(enemyHp), dmg); }
+// wipes what earlier calls left on the stack, so a test does not see an older bullet
+__declspec(noinline) static void ScrubStack() { volatile char z[0x1000]; for (auto &c : z) c = 0; }
 static const WStats *W(uint8_t *w) { auto &m = P(me).weapons; auto it = m.find(w); return it == m.end() ? nullptr : &it->second; }
 
 int main(int argc, char **argv) {
@@ -44,8 +47,10 @@ int main(int argc, char **argv) {
     b1 = Obj(1); *(uint8_t **)(b1 + 0x2A0) = w1;     // bullet -> its weapon
     b0 = Obj(1);                                     // a bullet without a weapon link (e.g. a support unit's)
 
-    printf("me %p w1 %p w2 %p w3 %p b1 %p b0 %p\n", me, w1, w2, w3, b1, b0);
     EnterCriticalSection(&g_cs); NewMission(me); LeaveCriticalSection(&g_cs);
+    // 4) only a bullet without a weapon link -> 'not recognised' (first: no other bullet was on the stack yet)
+    ScrubStack(); Hit(b0, nullptr, 40);
+    printf("4) unknown dmg=%.0f (expect 40)\n", W(nullptr) ? W(nullptr)->dmg : -1);
     // 1) bullet of weapon 1 on the stack, an unrelated weapon further up: the closer bullet wins
     Hit(b1, w2, 100); Hit(b0, b1, 50);
     printf("1) w1 dmg=%.0f hits=%u name=%s (expect 150 2 %s)\n", W(w1) ? W(w1)->dmg : -1, W(w1) ? W(w1)->hits : 0,
@@ -57,9 +62,6 @@ int main(int argc, char **argv) {
     // 3) a kill is credited to the weapon
     Hit(b1, nullptr, 500, 200);
     printf("3) w1 kills=%u best=%.0f (expect 1 200)\n", W(w1) ? W(w1)->kills : 99, W(w1) ? W(w1)->best : -1);
-    // 4) only a bullet without a weapon link -> 'not recognised'
-    Hit(b0, nullptr, 40);
-    printf("4) unknown dmg=%.0f (expect 40)\n", W(nullptr) ? W(nullptr)->dmg : -1);
     // Fencer-like setup: four weapons in an array the soldier points to, each with its own bullet factory
     // (+0x7F8) and its name at +0x1B0; all share a device pointer (+0x2E0), which tells nothing
     {   uint8_t **arr = (uint8_t **)calloc(8, 8); *(uint8_t ***)(me + 0x1950) = arr; dev = (uint8_t *)calloc(1, 64);
@@ -77,6 +79,19 @@ int main(int argc, char **argv) {
     { uint8_t *rec = (uint8_t *)calloc(1, 0x200); *(uint8_t **)(rec + 0x30) = fw[3] + 0x1650; *(uint8_t **)(rec + 0x8) = me; Hit(rec, nullptr, 17); }
     // 9) the damage info refers to weapon 1's factory
     g_infoExtra = (uintptr_t)fac[0]; Hit(nullptr, nullptr, 19); g_infoExtra = 0;
+    // 10) two vehicle weapons 0x1710 apart (like Fuel / Autocannon (Right)): a pointer just inside the upper one
+    {   uint8_t *block = (uint8_t *)calloc(1, 0x4000);
+        uint8_t *lo = block, *hi = block + 0x1710; *(uintptr_t *)lo = VT(4); *(uintptr_t *)hi = VT(4);
+        static const wchar_t *n2[2] = { L"Fuel", L"Autocannon (Right)" };
+        *(const wchar_t **)(lo + 0x1B0) = n2[0]; *(const wchar_t **)(hi + 0x1B0) = n2[1];
+        uint8_t **arr = *(uint8_t ***)(me + 0x1950); arr[4] = lo; arr[5] = hi; g_widx.clear();
+        uint8_t *rec = (uint8_t *)calloc(1, 0x200); *(uint8_t **)(rec + 0x8) = me; *(uint8_t **)(rec + 0x40) = hi + 0x20;
+        Hit(rec, nullptr, 23);
+        printf("10) %s=%.0f %s=%.0f (expect 0 23)\n", WeaponName(lo).c_str(), W(lo) ? W(lo)->dmg : 0, WeaponName(hi).c_str(), W(hi) ? W(hi)->dmg : 0); }
+    // 11) an accessory is never one of the shooter's weapons
+    {   g_cls[VT(6)] = { "Weapon_Accessory", K_WEAPON }; uint8_t *acc = Obj(6); (*(uint8_t ***)(me + 0x1950))[6] = acc; g_widx.clear();
+        WIdx &x = WeaponsOf(me, GetTickCount64());
+        printf("11) accessory listed=%d (expect 0)\n", (int)(std::find(x.list.begin(), x.list.end(), acc) != x.list.end())); }
     printf("6-9) %s=%.0f %s=%.0f %s=%.0f %s=%.0f (expect 19 11 13 17)\n", WeaponName(fw[0]).c_str(), W(fw[0]) ? W(fw[0])->dmg : -1,
            WeaponName(fw[1]).c_str(), W(fw[1]) ? W(fw[1])->dmg : -1, WeaponName(fw[2]).c_str(), W(fw[2]) ? W(fw[2])->dmg : -1,
            WeaponName(fw[3]).c_str(), W(fw[3]) ? W(fw[3])->dmg : -1);
