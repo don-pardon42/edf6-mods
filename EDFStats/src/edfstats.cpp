@@ -40,7 +40,7 @@
 #include "MinHook.h"
 #pragma comment(lib, "ws2_32.lib")
 
-static const char *VERSION = "0.15";
+static const char *VERSION = "0.16";
 // ---- language: Russian for ru/uk/be/kk Windows, English otherwise; EDFStats.ini Language=auto|ru|en overrides
 static bool g_en = false;
 static inline const char *L_(const char *ru, const char *en) { return g_en ? en : ru; }
@@ -945,15 +945,13 @@ static bool FieldValue(uint32_t r, double &v, bool &isInt) {
     if (r == 0) { v = 0; isInt = false; return true; }
     return false;
 }
-static void ProbeShields(uint64_t now) {     // caller holds g_cs; every 100 ms
-    if (!g_wprobe || !g_localSol || g_missionEnded || Cls(g_localSol).name != "HeavyArmor") return;
-    WIdx &x = WeaponsOf(g_localSol, now);
-    for (uint8_t *w : x.list) {
-        if (Cls(w).name != "Weapon_Shield") continue;
-        std::vector<uint32_t> cur(0x1800 / 4);
-        if (!SafeRead(w, cur.data(), 0x1800)) continue;
-        ShieldHist &h = g_shields[w];
-        if (h.raw.empty()) { h.name = Weapon(w).name; h.raw = cur; Log("probe shield: %p \"%s\" found, its numbers are summed up at the end of the mission", w, h.name.c_str()); continue; }
+// one object's 4-byte fields into its history (shield or the Fencer himself)
+static void ProbeObject(uint8_t *obj, size_t bytes, const std::string &label) {
+    std::vector<uint32_t> cur(bytes / 4);
+    if (!SafeRead(obj, cur.data(), bytes)) return;
+    ShieldHist &h = g_shields[obj];
+    if (h.raw.empty()) { h.name = label; h.raw = cur; Log("probe shield: %p \"%s\" found, its numbers are summed up at the end of the mission", obj, label.c_str()); return; }
+    {
         ++h.samples;
         for (size_t i = 2; i < cur.size(); ++i) {                 // skip the vtable
             if (cur[i] == h.raw[i]) continue;
@@ -966,6 +964,14 @@ static void ProbeShields(uint64_t now) {     // caller holds g_cs; every 100 ms
         }
         h.raw = cur;
     }
+}
+static void ProbeShields(uint64_t now) {     // caller holds g_cs; every 100 ms
+    if (!g_wprobe || !g_localSol || g_missionEnded || Cls(g_localSol).name != "HeavyArmor") return;
+    WIdx &x = WeaponsOf(g_localSol, now);
+    bool shield = false;
+    for (uint8_t *w : x.list) if (Cls(w).name == "Weapon_Shield") { ProbeObject(w, 0x1800, Weapon(w).name); shield = true; }
+    // the durability may live in the Fencer rather than in the shield (2026-11-19: nothing in the shield changed like it)
+    if (shield) ProbeObject(g_localSol, 0x2400, "Fencer (HeavyArmor) himself");
 }
 static void ShieldSummary() {                // caller holds g_cs; at the end of a mission
     for (auto &kv : g_shields) {
