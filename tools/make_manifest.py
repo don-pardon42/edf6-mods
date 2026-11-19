@@ -22,7 +22,7 @@ MODS = [
      "description": "Подтягивает персонажей других игроков к их настоящей позиции, когда сетевая синхронизация отстаёт. Нужны IP игроков в настройках.",
      "description_en": "Pulls other players' characters to their real position when the game's network sync lags behind. Needs the players' IPs in the settings.",
      "files": ["SquadSync.dll", "SquadSync.ini"], "log": "SquadSync.log"},
-    {"id": "MortarCam", "version": "0.1", "tag": "mortarcam-v0.1",
+    {"id": "MortarCam", "version": "0.1.1", "tag": "mortarcam-v0.1.1",
      "description": "Фенсер: клавиша B поднимает камеру над полем боя, пока экипирована мортира (как вид бомбардировщика у Air Raider). Пробная версия: пишет подробный лог для доработки.",
      "description_en": "Fencer: the B key raises the camera above the battlefield while a mortar is equipped (like Air Raider's bomber view). Test version: writes a detailed log for further work.",
      "files": ["MortarCam.dll", "MortarCam.ini"], "log": "MortarCam.log"},

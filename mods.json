@@ -72,7 +72,7 @@
     },
     {
       "id": "MortarCam",
-      "version": "0.1",
+      "version": "0.1.1",
       "description": "Фенсер: клавиша B поднимает камеру над полем боя, пока экипирована мортира (как вид бомбардировщика у Air Raider). Пробная версия: пишет подробный лог для доработки.",
       "description_en": "Fencer: the B key raises the camera above the battlefield while a mortar is equipped (like Air Raider's bomber view). Test version: writes a detailed log for further work.",
       "log": "MortarCam.log",
@@ -80,13 +80,13 @@
         {
           "name": "MortarCam.dll",
           "kind": "dll",
-          "url": "https://github.com/don-pardon42/edf6-mods/releases/download/mortarcam-v0.1/MortarCam.dll",
-          "sha256": "717a7225abb00cd70d2a016c1b07a6747f4a4d184ac16cd8355e0c38c2953cc9"
+          "url": "https://github.com/don-pardon42/edf6-mods/releases/download/mortarcam-v0.1.1/MortarCam.dll",
+          "sha256": "c48e28f0ce2d6d5d87c9f996095497f565df50b33a57c9d7794e439feef106ad"
         },
         {
           "name": "MortarCam.ini",
           "kind": "ini",
-          "url": "https://github.com/don-pardon42/edf6-mods/releases/download/mortarcam-v0.1/MortarCam.ini",
+          "url": "https://github.com/don-pardon42/edf6-mods/releases/download/mortarcam-v0.1.1/MortarCam.ini",
           "sha256": "fa2a4199f6872c5da294b8632aebcd26865ad24c043cb4c12a4aa2f912bd2c9c"
         }
       ]
