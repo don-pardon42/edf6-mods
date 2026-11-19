@@ -1,4 +1,4 @@
-// EDF6 Launcher 0.4.0 - small launcher for EDF6 mods.
+// EDF6 Launcher 0.4.1 - small launcher for EDF6 mods.
 //   * mod list from mods.json in the GitHub repository (version, download links, SHA-256)
 //   * install / update / remove, on/off (off = DLL moved to Mods\Plugins\disabled, EDFModLoader does not load subfolders)
 //   * ini editor for every mod (comments become hints, 0/1 become checkboxes, keys are captured by pressing them)
@@ -50,7 +50,7 @@ static void PickLanguage(const std::string &setting) {
     g_en = !(p == LANG_RUSSIAN || p == LANG_UKRAINIAN || p == LANG_BELARUSIAN || p == LANG_KAZAK);
 }
 
-static const char *LAUNCHER_VERSION = "0.4.0";
+static const char *LAUNCHER_VERSION = "0.4.1";
 static const char *DEFAULT_MANIFEST = "https://raw.githubusercontent.com/don-pardon42/edf6-mods/main/mods.json";
 // raw.githubusercontent.com/.../main/... can serve an old mods.json for several minutes after a push (its cache of the
 // branch name; 2026-11-19: MortarCam 0.1.1 was not offered). For the default list the launcher therefore asks the
@@ -1066,6 +1066,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
         MSG msg;
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageW(&msg); if (msg.message == WM_QUIT) done = true; }
         if (done || g_quitRequested) break;
+        // minimized (or Alt+Tab away from a minimized window): the client area is 0 x 0, and every widget sized from it
+        // would be 0 x 0 too (ImGui asserts on that - 2026-11-19). Draw nothing until the window is back.
+        { RECT rc{}; GetClientRect(hwnd, &rc);
+          if (shot.empty() && (IsIconic(hwnd) || rc.right - rc.left < 8 || rc.bottom - rc.top < 8)) { Sleep(50); continue; } }
         if (g_resizeW) { if (g_rtv) { g_rtv->Release(); g_rtv = nullptr; } g_sc->ResizeBuffers(0, g_resizeW, g_resizeH, DXGI_FORMAT_UNKNOWN, 0); g_resizeW = g_resizeH = 0; MakeRtv(); }
         ImGui_ImplDX11_NewFrame(); ImGui_ImplWin32_NewFrame(); ImGui::NewFrame();
         DrawRoot(); DrawIniEditor();

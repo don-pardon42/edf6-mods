@@ -8,7 +8,7 @@ call "%VS%\VC\Auxiliary\Build\vcvars64.bat" >nul || exit /b 1
 set D=..\deps
 if not exist obj mkdir obj
 if not exist out mkdir out
-cl /nologo /O2 /MT /EHsc /std:c++17 /utf-8 /W3 /DUNICODE /D_UNICODE /I%D%\imgui /I%D%\imgui\backends /Foobj\ ^
+cl /nologo /O2 /MT /EHsc /std:c++17 /utf-8 /W3 /DNDEBUG /DUNICODE /D_UNICODE /I%D%\imgui /I%D%\imgui\backends /Foobj\ ^
    src\launcher.cpp %D%\imgui\imgui.cpp %D%\imgui\imgui_draw.cpp %D%\imgui\imgui_tables.cpp %D%\imgui\imgui_widgets.cpp ^
    %D%\imgui\backends\imgui_impl_dx11.cpp %D%\imgui\backends\imgui_impl_win32.cpp ^
    /Fe:out\EDF6Launcher.exe /link /SUBSYSTEM:WINDOWS user32.lib gdi32.lib d3d11.lib winhttp.lib bcrypt.lib shell32.lib || exit /b 1

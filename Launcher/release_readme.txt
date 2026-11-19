@@ -1,4 +1,4 @@
-EDF6 Launcher 0.4.0
+EDF6 Launcher 0.4.1
 ===================
 
 RU

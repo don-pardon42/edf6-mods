@@ -1,6 +1,6 @@
-# EDF6 Launcher 0.4.0
+# EDF6 Launcher 0.4.1
 
-**Скачать готовый exe:** [EDF6Launcher.exe](https://github.com/don-pardon42/edf6-mods/releases/download/launcher-v0.4.0/EDF6Launcher.exe) — положить в папку игры и запустить, собирать не нужно.
+**Скачать готовый exe:** [EDF6Launcher.exe](https://github.com/don-pardon42/edf6-mods/releases/download/launcher-v0.4.1/EDF6Launcher.exe) — положить в папку игры и запустить, собирать не нужно.
 
 Маленький лаунчер для модов EDF6: один `EDF6Launcher.exe` (~0.9 МБ, ничего ставить не нужно), кладётся в папку игры.
 

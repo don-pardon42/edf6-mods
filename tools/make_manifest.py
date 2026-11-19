@@ -30,7 +30,7 @@ MODS = [
      "files": ["MortarCam.dll", "MortarCam.ini"], "log": "MortarCam.log"},
 ]
 
-LAUNCHER = {"version": "0.4.0", "tag": "launcher-v0.4.0", "file": "EDF6Launcher.exe"}
+LAUNCHER = {"version": "0.4.1", "tag": "launcher-v0.4.1", "file": "EDF6Launcher.exe"}
 
 def sha256(path):
     h = hashlib.sha256()
