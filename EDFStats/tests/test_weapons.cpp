@@ -110,7 +110,9 @@ int main(int argc, char **argv) {
         float d = 1500; memcpy(sh + 0x6A0, &d, 4);
         g_localSol = fen; ProbeShields(GetTickCount64());
         d = 1320; memcpy(sh + 0x6A0, &d, 4); ProbeShields(GetTickCount64() + 100);
-        printf("12) shield probe ran (expect a 'probe shield: ... +6A0 1500.000 -> 1320.000' line above)\n"); }
+        for (int k = 1; k <= 30; ++k) { float px = (float)k; memcpy(sh + 0x90, &px, 4); ProbeShields(GetTickCount64() + 200 + k); }   // a moving position field
+        g_missionEnded = false; ShieldSummary();
+        printf("12) summary above lists +06A0 (first 1500 last 1320, down 1) before +0090 (up 29) (expect so)\n"); }
     LeaveCriticalSection(&g_cs);
     return 0;
 }

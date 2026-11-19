@@ -40,7 +40,7 @@
 #include "MinHook.h"
 #pragma comment(lib, "ws2_32.lib")
 
-static const char *VERSION = "0.13";
+static const char *VERSION = "0.14";
 // ---- language: Russian for ru/uk/be/kk Windows, English otherwise; EDFStats.ini Language=auto|ru|en overrides
 static bool g_en = false;
 static inline const char *L_(const char *ru, const char *en) { return g_en ? en : ru; }
@@ -922,34 +922,58 @@ static void *__fastcall hApplyDamage(uint8_t *self, uint8_t *info) {
 
 // ---- Fencer shield probe (WeaponProbe=1) ----------------------------------------------------------
 // The shield blocks bullets before they reach ApplyDamage, so what it absorbs is not seen there. Its
-// durability is a number inside the Weapon_Shield object that drops when it blocks: this logs the float
-// fields of the local player's shields that change, so the next test shows which one it is.
-// Fields that change all the time (animation timers) are silenced after 15 changes.
+// durability is a number inside the Weapon_Shield object that drops when it blocks. Every 100 ms each
+// 4-byte field of the local Fencer's shields is read (as a float, or as an integer when it is not a sane
+// float) and its history is kept: first / last / min / max value, how often it went up and down. At the end
+// of the mission a summary of the fields that changed is logged: position and animation fields change
+// thousands of times, durability drops in steps when the shield blocks.
+struct FieldHist { double first = 0, last = 0, mn = 0, mx = 0; unsigned up = 0, down = 0; bool isInt = false, seen = false; };
+struct ShieldHist { std::string name; std::vector<uint32_t> raw; std::map<size_t, FieldHist> f; unsigned samples = 0; };
+static std::unordered_map<uint8_t *, ShieldHist> g_shields;
+static bool FieldValue(uint32_t r, double &v, bool &isInt) {
+    float fl; memcpy(&fl, &r, 4);
+    if (std::isfinite(fl) && fabsf(fl) >= 1e-4f && fabsf(fl) <= 1e6f) { v = fl; isInt = false; return true; }
+    if (r > 0 && r <= 10000000u) { v = (double)r; isInt = true; return true; }
+    if (r == 0) { v = 0; isInt = false; return true; }
+    return false;
+}
 static void ProbeShields(uint64_t now) {     // caller holds g_cs; every 100 ms
-    static std::unordered_map<uint8_t *, std::vector<float>> snap;
-    static std::unordered_map<uint8_t *, std::unordered_map<size_t, int>> changes;
-    static unsigned lines;
-    if (!g_wprobe || !g_localSol || lines > 400 || Cls(g_localSol).name != "HeavyArmor") return;
+    if (!g_wprobe || !g_localSol || g_missionEnded || Cls(g_localSol).name != "HeavyArmor") return;
     WIdx &x = WeaponsOf(g_localSol, now);
     for (uint8_t *w : x.list) {
         if (Cls(w).name != "Weapon_Shield") continue;
-        std::vector<float> cur(0x1800 / 4);
+        std::vector<uint32_t> cur(0x1800 / 4);
         if (!SafeRead(w, cur.data(), 0x1800)) continue;
-        auto it = snap.find(w);
-        if (it == snap.end()) {
-            snap[w] = cur; Log("probe shield: %p \"%s\" found, watching its numbers", w, Weapon(w).name.c_str()); ++lines;
-            continue;
+        ShieldHist &h = g_shields[w];
+        if (h.raw.empty()) { h.name = Weapon(w).name; h.raw = cur; Log("probe shield: %p \"%s\" found, its numbers are summed up at the end of the mission", w, h.name.c_str()); continue; }
+        ++h.samples;
+        for (size_t i = 2; i < cur.size(); ++i) {                 // skip the vtable
+            if (cur[i] == h.raw[i]) continue;
+            double a, b; bool ia, ib;
+            if (!FieldValue(h.raw[i], a, ia) || !FieldValue(cur[i], b, ib)) continue;
+            FieldHist &fh = h.f[i * 4];
+            if (!fh.seen) { fh.seen = true; fh.first = fh.mn = fh.mx = a; fh.isInt = ia; }
+            fh.last = b; fh.mn = std::min(fh.mn, b); fh.mx = std::max(fh.mx, b);
+            if (b > a) ++fh.up; else ++fh.down;
         }
-        std::vector<float> &old = it->second;
-        for (size_t i = 2; i < cur.size(); ++i) {
-            float a = old[i], b = cur[i];
-            if (a == b || !std::isfinite(a) || !std::isfinite(b) || fabsf(a) > 1e6f || fabsf(b) > 1e6f || (fabsf(a) < 1e-6f && fabsf(b) < 1e-6f)) continue;
-            int &c = changes[w][i * 4];
-            if (++c > 15) continue;
-            Log("probe shield: %p +%03zX %.3f -> %.3f%s", w, i * 4, a, b, c == 15 ? " (changes a lot, silenced)" : ""); ++lines;
-        }
-        old = cur;
+        h.raw = cur;
     }
+}
+static void ShieldSummary() {                // caller holds g_cs; at the end of a mission
+    for (auto &kv : g_shields) {
+        ShieldHist &h = kv.second;
+        std::vector<std::pair<size_t, FieldHist>> v(h.f.begin(), h.f.end());
+        // rarely changing fields first: durability is among them, animation and position are not
+        std::sort(v.begin(), v.end(), [](auto &a, auto &b) { return a.second.up + a.second.down < b.second.up + b.second.down; });
+        Log("probe shield summary: %p \"%s\", %u samples, %zu fields changed", kv.first, h.name.c_str(), h.samples, v.size());
+        int n = 0;
+        for (auto &e : v) {
+            if (n++ >= 80) break;
+            const FieldHist &f = e.second;
+            Log("    +%04zX %s first %.3f last %.3f min %.3f max %.3f, up %u down %u", e.first, f.isInt ? "int  " : "float", f.first, f.last, f.mn, f.mx, f.up, f.down);
+        }
+    }
+    g_shields.clear();
 }
 
 // ---- distance (sampled from the worker thread every 100 ms) -------------------------------------
@@ -1216,6 +1240,7 @@ static void WriteResults(const char *why) {      // caller holds g_cs
         }
     }
     Log("==== END ==== (packets: EOS sent %u received %u, UDP sent %u received %u)", g_txEos, g_rxEos, g_txUdp, g_rxUdp);
+    if (!g_shields.empty() && strcmp(why, "F9") != 0) ShieldSummary();
 
     char stamp[64];
     snprintf(stamp, sizeof stamp, "%04d-%02d-%02d_%02d-%02d-%02d", g_missionStart.wYear, g_missionStart.wMonth,
@@ -1245,13 +1270,22 @@ static void RefreshView(uint64_t now) {          // caller holds g_cs
 }
 
 // ---- worker thread: hotkeys, network, distance ----------------------------------------------------
+static bool GameInFront() {
+    HWND w = GetForegroundWindow(); if (!w) return false;
+    if (g_hwnd) return w == g_hwnd;
+    DWORD pid = 0; GetWindowThreadProcessId(w, &pid); return pid == GetCurrentProcessId();
+}
 static DWORD WINAPI Worker(LPVOID) {
     OverlayHook();
     bool d1 = false, d2 = false; uint64_t lastSend = 0, lastPos = 0, lastName = 0, lastView = 0;
     for (;;) {
         Sleep(50);
         uint64_t now = GetTickCount64();
-        bool k1 = (GetAsyncKeyState(g_dumpKey) & 0x8000) != 0, k2 = (GetAsyncKeyState(g_resetKey) & 0x8000) != 0;
+        // keys count only while the game window is in front (2026-11-19: a key pressed in another program reset a
+        // 20-minute mission); starting anew also needs Ctrl held
+        bool fg = GameInFront();
+        bool k1 = fg && (GetAsyncKeyState(g_dumpKey) & 0x8000) != 0;
+        bool k2 = fg && (GetAsyncKeyState(g_resetKey) & 0x8000) != 0 && (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
         EnterCriticalSection(&g_cs);
         NetReceive();
         if (now - lastPos >= 100) { SampleDistance(); ProbeShields(now); lastPos = now; }
@@ -1389,7 +1423,7 @@ extern "C" __declspec(dllexport) bool EDFMLAPI EML6_Load(PluginInfo *info) {
         Log("WARNING: result screen close not found, hide the scoreboard with F7");
     g_missionStartMs = GetTickCount64(); GetLocalTime(&g_missionStart);
     CreateThread(nullptr, 0, Worker, nullptr, 0, nullptr);
-    Log("ready. F9 = write results, F10 = start counting anew. Results are saved automatically when the mission ends.");
+    Log("ready. F9 = write results, Ctrl+F10 = start counting anew (keys work only in the game window). Results are saved automatically when the mission ends.");
     return true;
 }
 BOOL APIENTRY DllMain(HMODULE, DWORD, LPVOID) { return TRUE; }
