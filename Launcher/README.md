@@ -18,9 +18,19 @@
 - **Язык** — русский или английский по языку Windows (русский для ru/uk/be/kk); `Language=auto|ru|en` в `EDF6Launcher.ini`.
 - **Играть** — запускает игру (`GameExe` в `EDF6Launcher.ini`, по умолчанию `EDF6.exe`).
 - Проверяет, что EDFModLoader установлен, и не даёт обновлять моды при запущенной игре.
+- **Логи** (с 0.4.0), кнопки в «Модах» и «Настройках»:
+  - «Собрать логи» — один zip в `EDF6Launcher_logs\` (логи и настройки всех модов, `ModLoader.log`, последний
+    отчёт EDFStats и отчёты трёх последних миссий, `info.txt` с версиями), папка открывается с выделенным архивом —
+    его можно перетащить в Discord/Telegram;
+  - «Отправить логи друзьям» — тот же архив по локальной сети / VPN на адреса из `Peers` (EDFStats.ini или
+    SquadSync.ini, либо `LogPeers` в `EDF6Launcher.ini`), свой адрес пропускается;
+  - пока лаунчер открыт, он принимает архивы на TCP-порту `LogPort` (27788) в `EDF6Launcher_logs\received\`
+    («Полученные логи»). Принимается только zip до 100 МБ, ничего из полученного не открывается и не запускается.
+    При первом запуске Windows спросит разрешение для брандмауэра — разрешите для частных сетей.
 
 Настройки самого лаунчера — `EDF6Launcher.ini` рядом с exe (создаётся при первом запуске):
-`GameDir`, `GameExe`, `GameArgs`, `CloseOnPlay`, `Manifest`, `Language`.
+`GameDir`, `GameExe`, `GameArgs`, `CloseOnPlay`, `Manifest`, `Language`, а также `LogPort` (27788),
+`ReceiveLogs` (1/0), `LogPeers` (адреса через запятую; пусто — из `Peers` модов).
 
 ## Сборка и проверка
 
@@ -28,6 +38,7 @@
 Launcher\build.bat
 Launcher\out\EDF6Launcher.exe --game-dir C:\temp\fakegame --selftest-install   & rem ставит все моды в тестовую папку, отчёт в out\selftest.txt
 Launcher\out\EDF6Launcher.exe --screenshot out\shot.bmp                         & rem рисует окно в картинку
+Launcher\out\EDF6Launcher.exe --game-dir <папка игры> --selftest-logs            & rem собирает логи, шлёт их сам себе (порт 27799), сравнивает
 ```
 
 ## Выпуск новой версии мода

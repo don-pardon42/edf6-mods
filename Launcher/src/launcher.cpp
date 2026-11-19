@@ -1,10 +1,11 @@
-// EDF6 Launcher 0.3.2 - small launcher for EDF6 mods.
+// EDF6 Launcher 0.4.0 - small launcher for EDF6 mods.
 //   * mod list from mods.json in the GitHub repository (version, download links, SHA-256)
 //   * install / update / remove, on/off (off = DLL moved to Mods\Plugins\disabled, EDFModLoader does not load subfolders)
 //   * ini editor for every mod (comments become hints, 0/1 become checkboxes, keys are captured by pressing them)
 //   * checks EDFModLoader, opens logs / reports / folders, starts the game
+//   * collects all logs into one zip and sends it to the other players on the LAN, receives theirs (logs.inc)
 // Updates never overwrite the player's ini: only keys that are missing are added.
-// Command line (for testing): --game-dir <dir>  --manifest <file or url>  --screenshot <file.bmp>  --selftest-install
+// Command line (for testing): --game-dir <dir>  --manifest <file or url>  --screenshot <file.bmp>  --selftest-install  --selftest-logs
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #define _CRT_SECURE_NO_WARNINGS
@@ -48,7 +49,7 @@ static void PickLanguage(const std::string &setting) {
     g_en = !(p == LANG_RUSSIAN || p == LANG_UKRAINIAN || p == LANG_BELARUSIAN || p == LANG_KAZAK);
 }
 
-static const char *LAUNCHER_VERSION = "0.3.2";
+static const char *LAUNCHER_VERSION = "0.4.0";
 static const char *DEFAULT_MANIFEST = "https://raw.githubusercontent.com/don-pardon42/edf6-mods/main/mods.json";
 // raw.githubusercontent.com/.../main/... can serve an old mods.json for several minutes after a push (its cache of the
 // branch name; 2026-11-19: MortarCam 0.1.1 was not offered). For the default list the launcher therefore asks the
@@ -446,6 +447,8 @@ static void LoadConfig() {
     g_plugins = g_gameDir + "\\Mods\\Plugins"; g_disabled = g_plugins + "\\disabled"; g_lockPath = g_plugins + "\\edf6mods.lock.json";
 }
 
+#include "logs.inc"
+
 // ---- UI: themes --------------------------------------------------------------------------------------------
 // One modern theme (plain window) and three "old PC game launcher" themes: a painted backdrop drawn in code
 // (night city, giant ants on the roofs, a mothership with a beam, searchlights, tracers), a chunky title,
@@ -804,6 +807,7 @@ static void UpdateButtons(bool busy) {
     ImGui::EndDisabled();
     ImGui::EndDisabled();
     ImGui::SameLine(); if (ImGui::Button(L_(u8"Папка модов", u8"Mods folder"))) OpenPath(g_plugins);
+    LogButtons(busy);
 }
 static void ModLoaderLine() {
     const Theme &T = TH();
@@ -892,7 +896,7 @@ static void DrawRetro(bool busy) {
 
     // panels over the art
     if (g_panel != P_NONE) {
-        ImGui::SetNextWindowSize(ImVec2(Wd * (g_panel == P_MODS ? 0.86f : 0.6f), g_panel == P_MODS ? Ht * 0.74f : Ht * 0.34f), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(Wd * (g_panel == P_MODS ? 0.86f : 0.6f), g_panel == P_MODS ? Ht * 0.74f : Ht * 0.48f), ImGuiCond_Always);
         ImGui::SetNextWindowPos(ImVec2(Wd * 0.5f, Ht * 0.47f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
         bool open = true;
         const char *title = g_panel == P_MODS ? L_(u8"АРСЕНАЛ МОДОВ###panel", u8"MOD ARSENAL###panel") : L_(u8"НАСТРОЙКИ###panel", u8"SETTINGS###panel");
@@ -901,7 +905,7 @@ static void DrawRetro(bool busy) {
             ImGui::PopFont();
             if (g_panel == P_MODS) {
                 ModLoaderLine();
-                ImGui::BeginChild("mods", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() * 1.3f), true);
+                ImGui::BeginChild("mods", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() * 2.3f), true);
                 DrawModsTable(busy);
                 ImGui::EndChild();
                 UpdateButtons(busy);
@@ -912,6 +916,12 @@ static void DrawRetro(bool busy) {
                 ModLoaderLine();
                 if (ImGui::Button(L_(u8"Настройки лаунчера (папка, exe, аргументы)", u8"Launcher settings (folder, exe, arguments)"))) OpenLauncherIni();
                 ImGui::SameLine(); if (ImGui::Button(L_(u8"Папка игры", u8"Game folder"))) OpenPath(g_gameDir);
+                ImGui::Spacing(); ImGui::PushFont(g_bold); ImGui::Text(L_(u8"Логи", u8"Logs")); ImGui::PopFont();
+                { static std::vector<std::string> own = OwnAddresses(); std::string peers;
+                  for (auto &p : LogPeers()) peers += (peers.empty() ? "" : ", ") + p + (std::find(own.begin(), own.end(), p) != own.end() ? L_(u8" (это вы)", u8" (you)") : "");
+                  ImGui::TextColored(T.dim, L_(u8"Кому отправлять: %s", u8"Send to: %s"), peers.empty() ? L_(u8"никого (заполните Peers)", u8"nobody (fill in Peers)") : peers.c_str());
+                  ImGui::TextColored(T.dim, "%s", g_listenState.c_str()); }
+                LogButtons(busy);
             }
         } else ImGui::PopFont();
         ImGui::End();
@@ -956,18 +966,36 @@ static void SaveBmp(const std::string &path) {
 
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     int argc; wchar_t **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    std::string shot, playExe; bool selftest = false;
+    std::string shot, playExe; bool selftest = false, logtest = false;
     for (int i = 1; i < argc; ++i) {
         std::wstring a = argv[i];
         if (a == L"--game-dir" && i + 1 < argc) g_gameDir = U(argv[++i]);
         else if (a == L"--manifest" && i + 1 < argc) g_manifestSrc = U(argv[++i]);
         else if (a == L"--screenshot" && i + 1 < argc) shot = U(argv[++i]);
         else if (a == L"--selftest-install") selftest = true;
+        else if (a == L"--selftest-logs") logtest = true;
         else if (a == L"--selftest-play" && i + 1 < argc) playExe = U(argv[++i]);
         else if (a == L"--lang" && i + 1 < argc) g_langArg = U(argv[++i]);
     }
-    LoadConfig();
+    LoadConfig(); LoadLogConfig();
     g_status = L_(u8"Готово", u8"Ready");
+    if (logtest) {                     // collect the logs of --game-dir, send them to ourselves on port 27799, compare (no window)
+        FILE *o = _wfopen(W(ExeDir() + "\\selftest.txt").c_str(), L"w");
+        g_logPort = 27799; g_receiveLogs = true; StartLogListener();
+        fprintf(o, "listener: %s\n", g_listenState.c_str());
+        std::string data, path = BuildLogZip(data);
+        fprintf(o, "zip: %s (%zu bytes)\n", path.c_str(), data.size());
+        std::string err = SendLogFile("127.0.0.1", g_logPort, path.substr(path.find_last_of('\\') + 1), data);
+        fprintf(o, "send: %s\n", err.empty() ? "delivered" : err.c_str());
+        for (int i = 0; i < 30 && g_receivedCount == 0; ++i) Sleep(100);
+        std::string got, rp; { std::lock_guard<std::mutex> l(g_mx); rp = ReceivedDir() + "\\" + g_lastReceived; }
+        bool same = ReadFile(rp, got) && got == data;
+        fprintf(o, "received: %d file(s), %s, identical=%d\n", (int)g_receivedCount, rp.c_str(), same);
+        fprintf(o, "peers: "); for (auto &p : LogPeers()) fprintf(o, "%s ", p.c_str());
+        fprintf(o, "\nown: "); for (auto &p : OwnAddresses()) fprintf(o, "%s ", p.c_str());
+        fprintf(o, "\nplayer: %s\n", PlayerName().c_str());
+        fclose(o); return 0;
+    }
     if (!playExe.empty()) {           // press Play the way the UI does (with g_mx held), report and exit
         g_gameExe = playExe; g_gameArgs = "";
         { std::lock_guard<std::mutex> l(g_mx); Play(); }
@@ -1011,7 +1039,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     ApplyTheme(g_theme);
     ImGui_ImplWin32_Init(hwnd); ImGui_ImplDX11_Init(g_dev, g_ctx);
 
-    if (shot.empty()) RunWorker([] { Status(L_(u8"Загружаю список модов...", u8"Loading the mod list...")); LoadManifest(); });
+    if (shot.empty()) { StartLogListener(); RunWorker([] { Status(L_(u8"Загружаю список модов...", u8"Loading the mod list...")); LoadManifest(); }); }
     else { LoadManifest(); }
 
     int frames = 0;
