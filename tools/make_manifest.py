@@ -4,6 +4,8 @@ usage: python tools/make_manifest.py
 Reads _release/<Mod>/* (the same files uploaded to the GitHub release of each mod) and writes mods.json
 in the repository root with versions, download links and SHA-256 of every file.
 Edit MODS below when a mod gets a new version, then upload the files to the release with the same tag.
+LAUNCHER is the launcher's own entry (its "update the launcher" button): _release/Launcher/EDF6Launcher.exe,
+uploaded to the release launcher-v<version>.
 """
 import hashlib, json, os
 
@@ -28,6 +30,8 @@ MODS = [
      "files": ["MortarCam.dll", "MortarCam.ini"], "log": "MortarCam.log"},
 ]
 
+LAUNCHER = {"version": "0.4.0", "tag": "launcher-v0.4.0", "file": "EDF6Launcher.exe"}
+
 def sha256(path):
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -38,6 +42,10 @@ def sha256(path):
 out = {"schema": 1, "repo": REPO,
        "modloader": {"name": "EDFModLoader", "page": "https://github.com/BlueAmulet/EDFModLoader/releases"},
        "mods": []}
+_lexe = os.path.join(HERE, "_release", "Launcher", LAUNCHER["file"])
+out["launcher"] = {"version": LAUNCHER["version"],
+                   "url": f"https://github.com/{REPO}/releases/download/{LAUNCHER['tag']}/{LAUNCHER['file']}",
+                   "sha256": sha256(_lexe)}
 for m in MODS:
     files = []
     for name in m["files"]:

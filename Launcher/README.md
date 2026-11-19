@@ -1,6 +1,6 @@
-# EDF6 Launcher 0.3.2
+# EDF6 Launcher 0.4.0
 
-**Скачать готовый exe:** [EDF6Launcher.exe](https://github.com/don-pardon42/edf6-mods/releases/download/launcher-v0.3.2/EDF6Launcher.exe) — положить в папку игры и запустить, собирать не нужно.
+**Скачать готовый exe:** [EDF6Launcher.exe](https://github.com/don-pardon42/edf6-mods/releases/download/launcher-v0.4.0/EDF6Launcher.exe) — положить в папку игры и запустить, собирать не нужно.
 
 Маленький лаунчер для модов EDF6: один `EDF6Launcher.exe` (~0.9 МБ, ничего ставить не нужно), кладётся в папку игры.
 
@@ -18,6 +18,9 @@
 - **Язык** — русский или английский по языку Windows (русский для ru/uk/be/kk); `Language=auto|ru|en` в `EDF6Launcher.ini`.
 - **Играть** — запускает игру (`GameExe` в `EDF6Launcher.ini`, по умолчанию `EDF6.exe`).
 - Проверяет, что EDFModLoader установлен, и не даёт обновлять моды при запущенной игре.
+- **Самообновление** (с 0.4.0): в `mods.json` есть запись `launcher` (версия, ссылка, SHA-256); если она новее,
+  на главном экране появляется наклейка, а в «Настройках» и «Модах» — кнопка «Обновить лаунчер». Новый exe проверяется
+  по SHA-256, старый остаётся как `EDF6Launcher.exe.old` до следующего запуска.
 - **Логи** (с 0.4.0), кнопки в «Модах» и «Настройках»:
   - «Собрать логи» — один zip в `EDF6Launcher_logs\` (логи и настройки всех модов, `ModLoader.log`, последний
     отчёт EDFStats и отчёты трёх последних миссий, `info.txt` с версиями), папка открывается с выделенным архивом —
@@ -39,6 +42,7 @@ Launcher\build.bat
 Launcher\out\EDF6Launcher.exe --game-dir C:\temp\fakegame --selftest-install   & rem ставит все моды в тестовую папку, отчёт в out\selftest.txt
 Launcher\out\EDF6Launcher.exe --screenshot out\shot.bmp                         & rem рисует окно в картинку
 Launcher\out\EDF6Launcher.exe --game-dir <папка игры> --selftest-logs            & rem собирает логи, шлёт их сам себе (порт 27799), сравнивает
+Launcher\out\EDF6Launcher.exe --selftest-selfupdate <mods.json>               & rem обновляет сам себя по записи launcher из локального mods.json (без перезапуска)
 ```
 
 ## Выпуск новой версии мода

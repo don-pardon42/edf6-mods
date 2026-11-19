@@ -4,8 +4,9 @@
 //   * ini editor for every mod (comments become hints, 0/1 become checkboxes, keys are captured by pressing them)
 //   * checks EDFModLoader, opens logs / reports / folders, starts the game
 //   * collects all logs into one zip and sends it to the other players on the LAN, receives theirs (logs.inc)
+//   * updates itself from the "launcher" entry of mods.json (selfupdate.inc)
 // Updates never overwrite the player's ini: only keys that are missing are added.
-// Command line (for testing): --game-dir <dir>  --manifest <file or url>  --screenshot <file.bmp>  --selftest-install  --selftest-logs
+// Command line (for testing): --game-dir <dir>  --manifest <file or url>  --screenshot <file.bmp>  --selftest-install  --selftest-logs  --selftest-selfupdate
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #define _CRT_SECURE_NO_WARNINGS
@@ -287,6 +288,8 @@ static std::string g_status = L_(u8"Готово", u8"Ready");
 static std::atomic<bool> g_busy{ false };
 static bool g_manifestOk = false; static std::string g_manifestErr;
 static std::map<std::string, std::string> g_lock;       // id -> version installed by the launcher
+static std::string g_launcherLatest, g_launcherUrl, g_launcherSha;   // "launcher" entry of mods.json (guarded by g_mx)
+static std::atomic<bool> g_quitRequested{ false };      // set by a worker (self-update); the UI loop closes the window
 
 static void Status(const std::string &s) { std::lock_guard<std::mutex> l(g_mx); g_status = s; }
 static void LoadLock() {
@@ -340,6 +343,7 @@ static void LoadManifest() {
     std::vector<Mod> list;
     if (ok && ParseJson(text, j)) {
         if (!j["modloader"]["page"].str().empty()) g_modloaderPage = j["modloader"]["page"].str();
+        { std::lock_guard<std::mutex> l(g_mx); g_launcherLatest = j["launcher"]["version"].str(); g_launcherUrl = j["launcher"]["url"].str(); g_launcherSha = j["launcher"]["sha256"].str(); }
         for (auto &e : j["mods"].a) {
             Mod m; m.id = e["id"].str(); m.version = e["version"].str(); m.description = e["description"].str(); m.descriptionEn = e["description_en"].str();
             m.log = e["log"].str(); m.report = e["report"].str(); m.inManifest = true;
@@ -448,6 +452,7 @@ static void LoadConfig() {
 }
 
 #include "logs.inc"
+#include "selfupdate.inc"
 
 // ---- UI: themes --------------------------------------------------------------------------------------------
 // One modern theme (plain window) and three "old PC game launcher" themes: a painted backdrop drawn in code
@@ -807,6 +812,7 @@ static void UpdateButtons(bool busy) {
     ImGui::EndDisabled();
     ImGui::EndDisabled();
     ImGui::SameLine(); if (ImGui::Button(L_(u8"Папка модов", u8"Mods folder"))) OpenPath(g_plugins);
+    if (LauncherUpdateAvailable()) { ImGui::SameLine(); LauncherUpdateButton(busy); }
     LogButtons(busy);
 }
 static void ModLoaderLine() {
@@ -860,7 +866,8 @@ static void DrawRetro(bool busy) {
     }
     ImGui::EndDisabled();
     // stickers
-    if (!ModLoaderOk()) Starburst(ImVec2(x0 - Wd * 0.05f, y0 + bh * 2.1f), Ht * 0.075f, L_(u8"НЕТ", u8"NO"), L_(u8"ЗАГРУЗЧИКА!", u8"LOADER!"));
+    if (LauncherUpdateAvailable()) Starburst(ImVec2(x0 - Wd * 0.04f, y0 + bh * 2.1f), Ht * 0.075f, L_(u8"НОВЫЙ", u8"NEW"), L_(u8"лаунчер", u8"launcher"));
+    else if (!ModLoaderOk()) Starburst(ImVec2(x0 - Wd * 0.05f, y0 + bh * 2.1f), Ht * 0.075f, L_(u8"НЕТ", u8"NO"), L_(u8"ЗАГРУЗЧИКА!", u8"LOADER!"));
     else if (AnyUpdate()) Starburst(ImVec2(x0 - Wd * 0.04f, y0 + bh * 2.1f), Ht * 0.075f, L_(u8"НОВОЕ!", u8"NEW!"), L_(u8"обновления", u8"updates"));
     else if (int n = MissingCount()) { std::string s = "+" + std::to_string(n); Starburst(ImVec2(x0 - Wd * 0.04f, y0 + bh * 2.1f), Ht * 0.07f, s.c_str(), n == 1 ? L_(u8"новый мод", u8"new mod") : L_(u8"новых мода", u8"new mods")); }
 
@@ -896,7 +903,7 @@ static void DrawRetro(bool busy) {
 
     // panels over the art
     if (g_panel != P_NONE) {
-        ImGui::SetNextWindowSize(ImVec2(Wd * (g_panel == P_MODS ? 0.86f : 0.6f), g_panel == P_MODS ? Ht * 0.74f : Ht * 0.48f), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(Wd * (g_panel == P_MODS ? 0.86f : 0.6f), g_panel == P_MODS ? Ht * 0.74f : Ht * 0.58f), ImGuiCond_Always);
         ImGui::SetNextWindowPos(ImVec2(Wd * 0.5f, Ht * 0.47f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
         bool open = true;
         const char *title = g_panel == P_MODS ? L_(u8"АРСЕНАЛ МОДОВ###panel", u8"MOD ARSENAL###panel") : L_(u8"НАСТРОЙКИ###panel", u8"SETTINGS###panel");
@@ -916,6 +923,9 @@ static void DrawRetro(bool busy) {
                 ModLoaderLine();
                 if (ImGui::Button(L_(u8"Настройки лаунчера (папка, exe, аргументы)", u8"Launcher settings (folder, exe, arguments)"))) OpenLauncherIni();
                 ImGui::SameLine(); if (ImGui::Button(L_(u8"Папка игры", u8"Game folder"))) OpenPath(g_gameDir);
+                ImGui::Spacing(); ImGui::PushFont(g_bold); ImGui::Text(L_(u8"Лаунчер", u8"Launcher")); ImGui::PopFont();
+                if (LauncherUpdateAvailable()) { ImGui::TextColored(T.accent, L_(u8"Версия %s, доступна %s", u8"Version %s, %s is available"), LAUNCHER_VERSION, g_launcherLatest.c_str()); LauncherUpdateButton(busy); }
+                else ImGui::TextColored(T.dim, L_(u8"Версия %s%s", u8"Version %s%s"), LAUNCHER_VERSION, g_launcherLatest.empty() ? "" : L_(u8" — последняя", u8" - the latest"));
                 ImGui::Spacing(); ImGui::PushFont(g_bold); ImGui::Text(L_(u8"Логи", u8"Logs")); ImGui::PopFont();
                 { static std::vector<std::string> own = OwnAddresses(); std::string peers;
                   for (auto &p : LogPeers()) peers += (peers.empty() ? "" : ", ") + p + (std::find(own.begin(), own.end(), p) != own.end() ? L_(u8" (это вы)", u8" (you)") : "");
@@ -966,7 +976,7 @@ static void SaveBmp(const std::string &path) {
 
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     int argc; wchar_t **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    std::string shot, playExe; bool selftest = false, logtest = false;
+    std::string shot, playExe, updManifest; bool selftest = false, logtest = false;
     for (int i = 1; i < argc; ++i) {
         std::wstring a = argv[i];
         if (a == L"--game-dir" && i + 1 < argc) g_gameDir = U(argv[++i]);
@@ -974,11 +984,20 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
         else if (a == L"--screenshot" && i + 1 < argc) shot = U(argv[++i]);
         else if (a == L"--selftest-install") selftest = true;
         else if (a == L"--selftest-logs") logtest = true;
+        else if (a == L"--selftest-selfupdate" && i + 1 < argc) updManifest = U(argv[++i]);
         else if (a == L"--selftest-play" && i + 1 < argc) playExe = U(argv[++i]);
         else if (a == L"--lang" && i + 1 < argc) g_langArg = U(argv[++i]);
     }
     LoadConfig(); LoadLogConfig();
     g_status = L_(u8"Готово", u8"Ready");
+    if (!updManifest.empty()) {        // read the "launcher" entry of a local mods.json, update this exe in place (no restart), report
+        FILE *o = _wfopen(W(ExeDir() + "\\selftest.txt").c_str(), L"w");
+        g_manifestSrc = updManifest; LoadManifest();
+        fprintf(o, "manifest: %s, launcher latest=%s, this=%s, update available=%d\n", g_manifestOk ? "ok" : g_manifestErr.c_str(), g_launcherLatest.c_str(), LAUNCHER_VERSION, (int)LauncherUpdateAvailable());
+        if (LauncherUpdateAvailable()) fprintf(o, "update: %s\n", UpdateLauncher(false).c_str());
+        fclose(o); return 0;
+    }
+    CleanupOldLauncher();
     if (logtest) {                     // collect the logs of --game-dir, send them to ourselves on port 27799, compare (no window)
         FILE *o = _wfopen(W(ExeDir() + "\\selftest.txt").c_str(), L"w");
         g_logPort = 27799; g_receiveLogs = true; StartLogListener();
@@ -1046,7 +1065,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
     for (bool done = false; !done;) {
         MSG msg;
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageW(&msg); if (msg.message == WM_QUIT) done = true; }
-        if (done) break;
+        if (done || g_quitRequested) break;
         if (g_resizeW) { if (g_rtv) { g_rtv->Release(); g_rtv = nullptr; } g_sc->ResizeBuffers(0, g_resizeW, g_resizeH, DXGI_FORMAT_UNKNOWN, 0); g_resizeW = g_resizeH = 0; MakeRtv(); }
         ImGui_ImplDX11_NewFrame(); ImGui_ImplWin32_NewFrame(); ImGui::NewFrame();
         DrawRoot(); DrawIniEditor();
