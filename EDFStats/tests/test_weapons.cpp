@@ -104,6 +104,13 @@ int main(int argc, char **argv) {
            P(me).dmg, sum, s.nWeapon, s.weapon[0].name, s.weapon[0].dmg);
     printf("   packet %zu bytes (EOS limit 1170)\n", sizeof(Packet));
     WriteResults("test");
+    // 12) shield probe: a Fencer's shield loses durability -> the changed number is logged
+    {   g_cls[VT(7)] = { "HeavyArmor", K_SOLDIER }; g_cls[VT(8)] = { "Weapon_Shield", K_WEAPON };
+        uint8_t *fen = Obj(7); uint8_t *sh = Obj(8); uint8_t **arr = (uint8_t **)calloc(4, 8); arr[0] = sh; *(uint8_t ***)(fen + 0x1950) = arr;
+        float d = 1500; memcpy(sh + 0x6A0, &d, 4);
+        g_localSol = fen; ProbeShields(GetTickCount64());
+        d = 1320; memcpy(sh + 0x6A0, &d, 4); ProbeShields(GetTickCount64() + 100);
+        printf("12) shield probe ran (expect a 'probe shield: ... +6A0 1500.000 -> 1320.000' line above)\n"); }
     LeaveCriticalSection(&g_cs);
     return 0;
 }

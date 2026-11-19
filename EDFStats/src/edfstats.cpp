@@ -40,7 +40,7 @@
 #include "MinHook.h"
 #pragma comment(lib, "ws2_32.lib")
 
-static const char *VERSION = "0.12";
+static const char *VERSION = "0.13";
 // ---- language: Russian for ru/uk/be/kk Windows, English otherwise; EDFStats.ini Language=auto|ru|en overrides
 static bool g_en = false;
 static inline const char *L_(const char *ru, const char *en) { return g_en ? en : ru; }
@@ -855,6 +855,9 @@ static void OnHit(uint8_t *self, uint8_t *info, float hp0, float hp1, bool dead0
     }
     if (loc) g_lastLocalMs = now;
     if (who || victim) g_lastFightMs = now;
+    if (g_wprobe && tc.name.find("Shield") != std::string::npos) {
+        static int shieldHits; if (shieldHits++ < 30) Log("probe shield: ApplyDamage on %s %p hp %.1f->%.1f attacker %s", tc.name.c_str(), self, hp0, hp1, acls.name.c_str());
+    }
     if (!who && !victim) return;
 
     int fr = Friendly(iTeam, tTeam);
@@ -917,6 +920,38 @@ static void *__fastcall hApplyDamage(uint8_t *self, uint8_t *info) {
     return r;
 }
 
+// ---- Fencer shield probe (WeaponProbe=1) ----------------------------------------------------------
+// The shield blocks bullets before they reach ApplyDamage, so what it absorbs is not seen there. Its
+// durability is a number inside the Weapon_Shield object that drops when it blocks: this logs the float
+// fields of the local player's shields that change, so the next test shows which one it is.
+// Fields that change all the time (animation timers) are silenced after 15 changes.
+static void ProbeShields(uint64_t now) {     // caller holds g_cs; every 100 ms
+    static std::unordered_map<uint8_t *, std::vector<float>> snap;
+    static std::unordered_map<uint8_t *, std::unordered_map<size_t, int>> changes;
+    static unsigned lines;
+    if (!g_wprobe || !g_localSol || lines > 400 || Cls(g_localSol).name != "HeavyArmor") return;
+    WIdx &x = WeaponsOf(g_localSol, now);
+    for (uint8_t *w : x.list) {
+        if (Cls(w).name != "Weapon_Shield") continue;
+        std::vector<float> cur(0x1800 / 4);
+        if (!SafeRead(w, cur.data(), 0x1800)) continue;
+        auto it = snap.find(w);
+        if (it == snap.end()) {
+            snap[w] = cur; Log("probe shield: %p \"%s\" found, watching its numbers", w, Weapon(w).name.c_str()); ++lines;
+            continue;
+        }
+        std::vector<float> &old = it->second;
+        for (size_t i = 2; i < cur.size(); ++i) {
+            float a = old[i], b = cur[i];
+            if (a == b || !std::isfinite(a) || !std::isfinite(b) || fabsf(a) > 1e6f || fabsf(b) > 1e6f || (fabsf(a) < 1e-6f && fabsf(b) < 1e-6f)) continue;
+            int &c = changes[w][i * 4];
+            if (++c > 15) continue;
+            Log("probe shield: %p +%03zX %.3f -> %.3f%s", w, i * 4, a, b, c == 15 ? " (changes a lot, silenced)" : ""); ++lines;
+        }
+        old = cur;
+    }
+}
+
 // ---- distance (sampled from the worker thread every 100 ms) -------------------------------------
 static float g_lastPos[3]; static uint8_t *g_lastPosSol;
 static void SampleDistance() {             // caller holds g_cs
@@ -957,6 +992,8 @@ static std::string Num(double v) {         // 12345.6 -> "12 346"
     return o;
 }
 struct Row { Summary s; bool local; bool partial; };
+// all damage the player took: from enemies (on foot and in vehicles), from allies and from their own fire
+static double TakenTotal(const Summary &s) { return (double)s.taken + s.takenVeh + s.takenFF + s.selfDmg; }
 
 static void WriteJson(const std::string &path, const std::vector<Row> &rows, const char *why, double secs) {
     FILE *f = fopen(path.c_str(), "w");
@@ -968,12 +1005,12 @@ static void WriteJson(const std::string &path, const std::vector<Row> &rows, con
                    "\"damageVehicle\": %.1f, \"hits\": %u, \"kills\": %u, \"killsVehicle\": %u, \"partsDestroyed\": %u, \"bestHit\": %.1f, "
                    "\"peakDps1s\": %.1f, \"peakDps5s\": %.1f, \"damageToPlayers\": %.1f, \"damageToAlliedNpc\": %.1f, "
                    "\"alliedNpcKilled\": %u, \"damageToSelf\": %.1f, \"takenFromAllies\": %.1f, \"taken\": %.1f, "
-                   "\"takenVehicle\": %.1f, \"deaths\": %u, \"distance\": %.1f, \"distanceVehicle\": %.1f,\n"
+                   "\"takenVehicle\": %.1f, \"takenTotal\": %.1f, \"deaths\": %u, \"distance\": %.1f, \"distanceVehicle\": %.1f,\n"
                    "     \"byEnemy\": [",
                 Esc(s.name, false).c_str(), Esc(s.cls, false).c_str(), rows[i].local ? "true" : "false", rows[i].partial ? "true" : "false",
                 s.seconds, s.dmg, s.dmgVeh, s.hits, s.kills, s.killsVeh, s.parts, s.best, s.peak1, s.peak5, s.ffPlayers, s.ffNpc,
                 s.ffKills, s.selfDmg, s.takenFF, s.taken,
-                s.takenVeh, s.deaths, s.dist, s.distVeh);
+                s.takenVeh, TakenTotal(s), s.deaths, s.dist, s.distVeh);
         for (int e = 0; e < s.nEnemy; ++e)
             fprintf(f, "%s{\"enemy\": \"%s\", \"class\": \"%s\", \"damage\": %.1f, \"kills\": %u}", e ? ", " : "", Esc(EnemyName(s.enemy[e].name), false).c_str(), Esc(s.enemy[e].name, false).c_str(),
                     s.enemy[e].dmg, s.enemy[e].kills);
@@ -1032,7 +1069,7 @@ tr:last-child td{border-bottom:0}.me td:first-child{color:var(--acc2)}.cls{color
         { L_(u8"Палач — больше всего убийств", u8"Executioner — most kills"), [](const Summary &s) { return (double)s.kills; }, "" },
         { L_(u8"Пиковая мощь — урон за 1 с", u8"Peak power — damage in 1 s"), [](const Summary &s) { return (double)s.peak1; }, "" },
         { L_(u8"Самый сильный удар", u8"Biggest hit"), [](const Summary &s) { return (double)s.best; }, "" },
-        { L_(u8"Стена — принял урона от врагов", u8"Wall — damage taken from enemies"), [](const Summary &s) { return (double)(s.taken + s.takenVeh); }, "" },
+        { L_(u8"Стена — получил больше всего урона", u8"Wall — most damage taken"), [](const Summary &s) { return TakenTotal(s); }, "" },
         { L_(u8"Турист — прошёл пешком", u8"Tourist — distance on foot"), [](const Summary &s) { return (double)s.dist; }, L_(u8" м", u8" m") },
         { L_(u8"Водитель — урон с техники", u8"Driver — damage from vehicles"), [](const Summary &s) { return (double)s.dmgVeh; }, "" },
         { L_(u8"Предатель — урон по игрокам", u8"Traitor — damage to players"), [](const Summary &s) { return (double)s.ffPlayers; }, "" },
@@ -1055,17 +1092,17 @@ tr:last-child td{border-bottom:0}.me td:first-child{color:var(--acc2)}.cls{color
 
     // main table
     fputs(L_(u8"<h2>Таблица</h2><div class=\"wrap\"><table><tr><th>Игрок</th><th>Урон</th><th>Пик DPS 1с / 5с</th><th>Убийства</th>", u8"<h2>Scoreboard</h2><div class=\"wrap\"><table><tr><th>Player</th><th>Damage</th><th>Peak DPS 1s / 5s</th><th>Kills</th>"), f);
-    fputs(L_(u8"<th>Части</th><th>Лучший удар</th><th>Получил: враги / свои</th><th>Смерти</th>", u8"<th>Parts</th><th>Best hit</th><th>Taken: enemies / allies</th><th>Deaths</th>"), f);
+    fputs(L_(u8"<th>Части</th><th>Лучший удар</th><th>Получено урона</th><th>из них враги / свои</th><th>Смерти</th>", u8"<th>Parts</th><th>Best hit</th><th>Damage taken</th><th>of that enemies / allies</th><th>Deaths</th>"), f);
     fputs(L_(u8"<th>По игрокам</th><th>По NPC</th><th>Себе</th><th>Пешком</th><th>На технике</th></tr>\n", u8"<th>To players</th><th>To NPCs</th><th>To self</th><th>On foot</th><th>In vehicles</th></tr>\n"), f);
     for (auto &r : rows) {
         const Summary &s = r.s;
         fprintf(f, "<tr%s><td>%s <span class=\"cls\">%s%s</span><div class=\"bar\"><i style=\"width:%.1f%%\"></i></div></td>",
                 r.local ? " class=\"me\"" : "", nm(r).c_str(), Esc(s.cls, true).c_str(),
                 r.partial ? L_(u8" · неполные данные", u8" · partial data") : "", 100.0 * s.dmg / top);
-        std::string rowFmt = std::string("<td>%s</td><td>%s / %s</td><td>%u</td><td>%u</td><td>%s</td><td>%s / %s</td><td>%u</td>") + L_(u8"<td>%s</td><td>%s</td><td>%s</td><td>%s м</td><td>%s м</td></tr>\n", u8"<td>%s</td><td>%s</td><td>%s</td><td>%s m</td><td>%s m</td></tr>\n");
+        std::string rowFmt = std::string("<td>%s</td><td>%s / %s</td><td>%u</td><td>%u</td><td>%s</td><td>%s</td><td>%s / %s</td><td>%u</td>") + L_(u8"<td>%s</td><td>%s</td><td>%s</td><td>%s м</td><td>%s м</td></tr>\n", u8"<td>%s</td><td>%s</td><td>%s</td><td>%s m</td><td>%s m</td></tr>\n");
         fprintf(f, rowFmt.c_str(),
                 Num(s.dmg).c_str(), Num(s.peak1).c_str(), Num(s.peak5).c_str(), s.kills, s.parts, Num(s.best).c_str(),
-                Num(s.taken + s.takenVeh).c_str(), Num(s.takenFF).c_str(), s.deaths, Num(s.ffPlayers).c_str(),
+                Num(TakenTotal(s)).c_str(), Num(s.taken + s.takenVeh).c_str(), Num(s.takenFF).c_str(), s.deaths, Num(s.ffPlayers).c_str(),
                 Num(s.ffNpc).c_str(), Num(s.selfDmg).c_str(), Num(s.dist).c_str(), Num(s.distVeh).c_str());
     }
     fputs("</table></div>\n", f);
@@ -1165,11 +1202,11 @@ static void WriteResults(const char *why) {      // caller holds g_cs
     for (auto &r : rows) {
         const Summary &s = r.s;
         Log("%-16s %-10s %s dmg=%.0f (vehicle %.0f) hits=%u kills=%u (vehicle %u) parts=%u best=%.0f peakDPS1s=%.0f peakDPS5s=%.0f "
-            "toPlayers=%.0f toNPC=%.0f npcKilled=%u self=%.0f taken=%.0f takenInVehicle=%.0f takenFromAllies=%.0f deaths=%u "
+            "toPlayers=%.0f toNPC=%.0f npcKilled=%u self=%.0f taken=%.0f takenInVehicle=%.0f takenFromAllies=%.0f takenTotal=%.0f deaths=%u "
             "walked=%.0fm driven=%.0fm",
             s.name, s.cls, r.local ? "[this PC]" : r.partial ? "[partial]" : "[network]", s.dmg, s.dmgVeh, s.hits, s.kills,
             s.killsVeh, s.parts, s.best, s.peak1, s.peak5, s.ffPlayers, s.ffNpc, s.ffKills, s.selfDmg, s.taken, s.takenVeh,
-            s.takenFF, s.deaths, s.dist, s.distVeh);
+            s.takenFF, TakenTotal(s), s.deaths, s.dist, s.distVeh);
         for (int i = 0; i < s.nFfFrom; ++i) Log("      friendly fire received from %s: %.0f", s.ffFrom[i].cls, s.ffFrom[i].dmg);
         for (int e = 0; e < s.nEnemy; ++e) Log("      %-40s dmg %8.0f  kills %u", EnemyName(s.enemy[e].name).c_str(), s.enemy[e].dmg, s.enemy[e].kills);
         for (int w = 0; w < s.nWeapon; ++w) {
@@ -1217,7 +1254,7 @@ static DWORD WINAPI Worker(LPVOID) {
         bool k1 = (GetAsyncKeyState(g_dumpKey) & 0x8000) != 0, k2 = (GetAsyncKeyState(g_resetKey) & 0x8000) != 0;
         EnterCriticalSection(&g_cs);
         NetReceive();
-        if (now - lastPos >= 100) { SampleDistance(); lastPos = now; }
+        if (now - lastPos >= 100) { SampleDistance(); ProbeShields(now); lastPos = now; }
         if (now - lastName >= 5000) { SteamName(); lastName = now; }
         if (now - lastSend >= (uint64_t)g_sendMs) { NetSend(); lastSend = now; }
         if (k1 && !d1) { NetSend(); WriteResults("F9"); fflush(g_log); }

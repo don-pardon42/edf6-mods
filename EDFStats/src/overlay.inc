@@ -136,7 +136,7 @@ static void DrawBoard(const LiveView &v) {
         { "MVP", [](const Summary &s) { return (double)s.dmg; } },
         { L_(u8"Палач", u8"Executioner"), [](const Summary &s) { return (double)s.kills; } },
         { L_(u8"Пиковая мощь", u8"Peak power"), [](const Summary &s) { return (double)s.peak1; } },
-        { L_(u8"Стена", u8"Wall"), [](const Summary &s) { return (double)(s.taken + s.takenVeh); } },
+        { L_(u8"Стена", u8"Wall"), [](const Summary &s) { return TakenTotal(s); } },
         { L_(u8"Турист", u8"Tourist"), [](const Summary &s) { return (double)s.dist; } },
         { L_(u8"Предатель", u8"Traitor"), [](const Summary &s) { return (double)s.ffPlayers; } },
     };
@@ -164,7 +164,7 @@ static void DrawBoard(const LiveView &v) {
             ImGui::TextColored(r.local ? GREEN : ImVec4(0.91f, 0.94f, 0.91f, 1), "%s", RowName(r));
             ImGui::SameLine(); ImGui::TextColored(DIM, "%s%s", s.cls, r.partial ? L_(u8" · неполн.", u8" · partial") : "");
             auto num = [](double x) { ImGui::TableNextColumn(); ImGui::Text("%s", NumSp(x).c_str()); };
-            num(s.dmg); num(s.peak1); num(s.kills); num(s.parts); num(s.best); num(s.taken + s.takenVeh); num(s.deaths);
+            num(s.dmg); num(s.peak1); num(s.kills); num(s.parts); num(s.best); num(TakenTotal(s)); num(s.deaths);
             ImGui::TableNextColumn(); if (s.ffPlayers > 0) ImGui::TextColored(RED, "%s", NumSp(s.ffPlayers).c_str()); else ImGui::Text("0");
             num(s.ffNpc); num(s.selfDmg);
             ImGui::TableNextColumn(); ImGui::Text(L_(u8"%s м", u8"%s m"), NumSp(s.dist).c_str());
