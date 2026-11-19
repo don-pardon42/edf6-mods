@@ -88,6 +88,12 @@ int main(int argc, char **argv) {
         uint8_t *rec = (uint8_t *)calloc(1, 0x200); *(uint8_t **)(rec + 0x8) = me; *(uint8_t **)(rec + 0x40) = hi + 0x20;
         Hit(rec, nullptr, 23);
         printf("10) %s=%.0f %s=%.0f (expect 0 23)\n", WeaponName(lo).c_str(), W(lo) ? W(lo)->dmg : 0, WeaponName(hi).c_str(), W(hi) ? W(hi)->dmg : 0); }
+    // 11b) an NPC's weapon referenced from the soldier is not ours (its owner field names another soldier)
+    {   uint8_t *npc = Obj(2); uint8_t *sn = Obj(0); *(uint8_t **)(sn + 0x38) = npc; (*(uint8_t ***)(me + 0x1950))[7] = sn; g_widx.clear();
+        WIdx &x = WeaponsOf(me, GetTickCount64());
+        printf("11b) NPC weapon listed=%d, own weapons still listed=%d (expect 0 1)\n", (int)(std::find(x.list.begin(), x.list.end(), sn) != x.list.end()),
+               (int)(std::find(x.list.begin(), x.list.end(), fw[0]) != x.list.end()));
+        (*(uint8_t ***)(me + 0x1950))[7] = nullptr; g_widx.clear(); }
     // 11) an accessory is never one of the shooter's weapons
     {   g_cls[VT(6)] = { "Weapon_Accessory", K_WEAPON }; uint8_t *acc = Obj(6); (*(uint8_t ***)(me + 0x1950))[6] = acc; g_widx.clear();
         WIdx &x = WeaponsOf(me, GetTickCount64());

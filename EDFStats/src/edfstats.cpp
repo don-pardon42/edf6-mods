@@ -40,7 +40,7 @@
 #include "MinHook.h"
 #pragma comment(lib, "ws2_32.lib")
 
-static const char *VERSION = "0.14";
+static const char *VERSION = "0.15";
 // ---- language: Russian for ru/uk/be/kk Windows, English otherwise; EDFStats.ini Language=auto|ru|en overrides
 static bool g_en = false;
 static inline const char *L_(const char *ru, const char *en) { return g_en ? en : ru; }
@@ -299,9 +299,17 @@ static bool HeapPtr(uintptr_t v) { return v >= 0x10000 && v <= 0x7FFFFFFFFFFFull
 struct WIdx { std::vector<uint8_t *> list; std::unordered_map<uintptr_t, uint8_t *> uniq; uint64_t builtMs = 0; };
 static std::unordered_map<uint8_t *, WIdx> g_widx;          // shooter -> its weapons (this mission)
 static const size_t W_SPAN = 0x1800;                        // bytes of a weapon object that are looked at
-static void AddWeapon(std::vector<uint8_t *> &out, uintptr_t v) {
+static const size_t W_OWNER = 0x38;                          // weapon -> the soldier / vehicle that carries it
+// a weapon whose owner field names another soldier or vehicle is not ours (2026-11-19: an NPC Ranger's
+// "sniper" turned up in a Fencer's list)
+static bool OwnedByOther(uint8_t *w, uint8_t *owner) {
+    uintptr_t o = Rd<uintptr_t>(w + W_OWNER); Kind k;
+    return owner && o && (uint8_t *)o != owner && GameObj(o, &k) && (k == K_SOLDIER || k == K_VEHICLE);
+}
+static void AddWeapon(std::vector<uint8_t *> &out, uintptr_t v, uint8_t *owner) {
     Kind k; if (!GameObj(v, &k) || k != K_WEAPON || std::find(out.begin(), out.end(), (uint8_t *)v) != out.end()) return;
     if (Cls((uint8_t *)v).name == "Weapon_Accessory") return;      // Fencer's add-on equipment never fires
+    if (OwnedByOther((uint8_t *)v, owner)) return;
     out.push_back((uint8_t *)v);
 }
 static WIdx &WeaponsOf(uint8_t *owner, uint64_t now, bool force = false) {
@@ -312,8 +320,8 @@ static WIdx &WeaponsOf(uint8_t *owner, uint64_t now, bool force = false) {
     for (size_t o = 0; o < 0x2400; o += 8) {                // the owner object and arrays it points to
         uintptr_t v = Rd<uintptr_t>(owner + o);
         if (!HeapPtr(v)) continue;
-        Kind k; if (GameObj(v, &k)) { if (k == K_WEAPON) AddWeapon(found, v); continue; }
-        uintptr_t arr[16]; if (SafeRead((const void *)v, arr, sizeof arr)) for (uintptr_t a : arr) AddWeapon(found, a);
+        Kind k; if (GameObj(v, &k)) { if (k == K_WEAPON) AddWeapon(found, v, owner); continue; }
+        uintptr_t arr[16]; if (SafeRead((const void *)v, arr, sizeof arr)) for (uintptr_t a : arr) AddWeapon(found, a, owner);
     }
     for (uint8_t *w : x.list) if (std::find(found.begin(), found.end(), w) == found.end() && GameObj((uintptr_t)w)) found.push_back(w);   // seen on the stack before
     bool changed = found != x.list;
@@ -364,7 +372,7 @@ static uint8_t *WeaponOfHit(const uint8_t *stack, const uint8_t *info, uint8_t *
         uintptr_t v = *(const uintptr_t *)q;
         if (!HeapPtr(v)) continue;
         Kind k = K_OTHER; bool obj = GameObj(v, &k);
-        if (obj && k == K_WEAPON) {                               // a weapon right on the stack (vehicle weapons do this)
+        if (obj && k == K_WEAPON && !OwnedByOther((uint8_t *)v, shooter)) {   // a weapon right on the stack (vehicle weapons do this)
             w = (uint8_t *)v; how = "weapon on stack"; snprintf(where, sizeof where, "stack+%lX", (long)(q - stack));
             if (std::find(x.list.begin(), x.list.end(), w) == x.list.end()) { x.list.push_back(w); x.builtMs = 0; }
             break;
@@ -385,7 +393,7 @@ static uint8_t *WeaponOfHit(const uint8_t *stack, const uint8_t *info, uint8_t *
         }
         for (size_t i = 0; i < n / 8; ++i) {
             Kind kr;
-            if (obj && !WeaponOfValue(x, rec[i], &how) && GameObj(rec[i], &kr) && kr == K_WEAPON) {   // a bullet's direct link to a weapon not listed yet
+            if (obj && !WeaponOfValue(x, rec[i], &how) && GameObj(rec[i], &kr) && kr == K_WEAPON && !OwnedByOther((uint8_t *)rec[i], shooter)) {   // a bullet's direct link to a weapon not listed yet
                 x.list.push_back((uint8_t *)rec[i]); x.builtMs = 0;
             }
             uint8_t *cand = WeaponOfValue(x, rec[i], &how);
