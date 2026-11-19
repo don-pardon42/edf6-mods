@@ -8,7 +8,7 @@
   "mods": [
     {
       "id": "EDFStats",
-      "version": "0.13",
+      "version": "0.14",
       "description": "Статистика игроков в кооперативе: урон, DPS, убийства, урон по своим, урон и DPS по каждому оружию. Окно в игре (F6/F7) и HTML-отчёт после миссии.",
       "description_en": "Co-op player statistics: damage, DPS, kills, friendly fire, damage and DPS per weapon. In-game overlay (F6/F7) and an HTML report after each mission.",
       "log": "EDFStats.log",
@@ -17,14 +17,14 @@
         {
           "name": "EDFStats.dll",
           "kind": "dll",
-          "url": "https://github.com/don-pardon42/edf6-mods/releases/download/edfstats-v0.13/EDFStats.dll",
-          "sha256": "dcee937fa297ae1859f7c7a3e229d3d512f707ae756bf9f7eef3947e35547fd9"
+          "url": "https://github.com/don-pardon42/edf6-mods/releases/download/edfstats-v0.14/EDFStats.dll",
+          "sha256": "dc743aa7a974bd3dde4c33e117a9e3ae284fd43b7feab3ab994febd1862dc6ef"
         },
         {
           "name": "EDFStats.ini",
           "kind": "ini",
-          "url": "https://github.com/don-pardon42/edf6-mods/releases/download/edfstats-v0.13/EDFStats.ini",
-          "sha256": "b996a99616dd494ccc1f5916fba903f6b6f5654b193e14d0b6fe05eebb538a3e"
+          "url": "https://github.com/don-pardon42/edf6-mods/releases/download/edfstats-v0.14/EDFStats.ini",
+          "sha256": "655cd14ed657306e51c87ed5d63edba666ff93b3392a59fdf849860f136fc209"
         }
       ]
     },
