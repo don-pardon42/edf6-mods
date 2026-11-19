@@ -1,4 +1,4 @@
-// MortarCam 0.1 (reconnaissance build) - EDF6 plugin for EDFModLoader.
+// MortarCam 0.1.1 (reconnaissance build) - EDF6 plugin for EDFModLoader.
 // Fencer: a key switches the camera to a raised "artillery" view while a mortar is equipped, reusing the game's
 // own mechanism of the Air Raider bomber view: the soldier's camera setting block soldier+0x230 / flag +0x224,
 // which the character camera reads every frame. Purely local, nothing is sent over the network.
@@ -18,7 +18,7 @@
 #include "MinHook.h"
 #include "mortarcam_logic.h"
 
-static const char *VERSION = "0.1.0";
+static const char *VERSION = "0.1.1";
 
 // ---- signatures (EDF.dll build 2024-06-03) --------------------------------------------------------
 // HeavyArmor (Fencer) per-frame update, vtable slot 5 (EDF.dll+5674B0)
@@ -33,7 +33,10 @@ static const size_t GO_DEAD = 0x2E8;
 static const size_t SB_CTRL = 0x340;        // local controller, not 0 = this machine's player
 static const size_t SB_RIDEFLAGS = 0x5D0;   // bit 4: Air Raider's update skips the bomber view then
 static const size_t SB_VEHICLE = 0x1548;
-static const size_t SB_SLOTS = 0x1970, SB_NSLOTS = 0x1980, SLOT_SIZE = 0x150, SLOT_WEAPON = 0x40;  // weapon slots (EDF.dll+5A42E0)
+// Weapons in hand (EDF.dll+5A42E0): soldier+0x1970 -> slot records (stride 0x150, count +0x1980); slot+0x40 points to
+// an element of the soldier's weapon array (+0x1950, all carried weapons), which holds the weapon object.
+// Fencer: 2 slots (two hands); switching the weapon set moves the slot pointers to the other array elements (0.1 log).
+static const size_t SB_SLOTS = 0x1970, SB_NSLOTS = 0x1980, SLOT_SIZE = 0x150, SLOT_WEAPON = 0x40;
 static const size_t W_FLAGS = 0x139;        // bytes +139..+13B: input/state flags (+13B: secondary fire active)
 static const size_t W_142 = 0x142;          // byte, set to 1 for all Fencer weapons each frame
 static const size_t W_NAME = 0x1B0;         // wchar_t*: weapon name
@@ -115,7 +118,11 @@ static float g_tilt = 0, g_up = 0.05f, g_down = 0.08f, g_gravity = 9.8f;
 static int g_probeLimit = 400, g_statusMs = 1000;
 
 // ---- per-player state -----------------------------------------------------------------------------
-struct WInfo { uintptr_t vt = 0; std::string cls, name, bullet; bool mortar = false; };
+struct WInfo { uintptr_t vt = 0; std::string cls, name, bullet; bool weapon = false, mortar = false; };
+static uint8_t *SlotWeapon(uint8_t *slots, uint32_t i) {   // *(*(slot + 0x40))
+    uint8_t *ref = Rd<uint8_t *>(slots + i * SLOT_SIZE + SLOT_WEAPON);
+    return ref ? Rd<uint8_t *>(ref) : nullptr;
+}
 static uint8_t *g_me;                        // local Fencer object
 static std::unordered_map<uint8_t *, WInfo> g_wi;
 static mc::Owner g_owner;
@@ -134,6 +141,8 @@ static const WInfo &Info(uint8_t *w) {
     auto it = g_wi.find(w);
     if (it != g_wi.end() && it->second.vt == vt) return it->second;
     WInfo wi; wi.vt = vt; wi.cls = ClassOf(w);
+    wi.weapon = wi.cls.compare(0, 7, "Weapon_") == 0;
+    if (!wi.weapon) { Log("slot object %p is %s, not a weapon; ignored", w, wi.cls.c_str()); return g_wi[w] = wi; }
     wi.name = WStrField(w, W_NAME); wi.bullet = WStrField(w, W_BULLET);
     wi.mortar = mc::NameMatches(wi.name, g_match);
     float fv[4] = {}; SafeRead(w + W_FIREVEC, fv, 16);
@@ -189,8 +198,8 @@ static void Frame(uint8_t *me) {
     uint32_t n = Rd<uint32_t>(me + SB_NSLOTS); if (n > 8) n = 8;
     uint8_t *slots = Rd<uint8_t *>(me + SB_SLOTS);
     for (uint32_t i = 0; i < n && slots; ++i) {
-        uint8_t *w = Rd<uint8_t *>(slots + i * SLOT_SIZE + SLOT_WEAPON);
-        if (!w) continue;
+        uint8_t *w = SlotWeapon(slots, i);
+        if (!w || !Info(w).weapon) continue;
         ws.push_back(w);
         if (g_probe) {
             uint8_t f[4] = {}; SafeRead(w + W_FLAGS, f, 3); f[3] = Rd<uint8_t>(w + W_142);
@@ -206,7 +215,7 @@ static void Frame(uint8_t *me) {
         g_slotKey = key; ++g_probeLines;
         std::string line;
         for (uint32_t i = 0; i < n && slots; ++i) {
-            uint8_t *w = Rd<uint8_t *>(slots + i * SLOT_SIZE + SLOT_WEAPON);
+            uint8_t *w = SlotWeapon(slots, i);
             char b[200];
             if (!w) { snprintf(b, sizeof b, " [%u] empty", i); line += b; continue; }
             snprintf(b, sizeof b, " [%u] %s state %llX flags %02X%02X%02X/%02X", i, Info(w).name.c_str(),
@@ -215,20 +224,24 @@ static void Frame(uint8_t *me) {
             line += b;
         }
         Log("slots:%s", line.c_str());
-        if (first) {                                           // slot records once per player object (to find the active set)
-            for (uint32_t i = 0; i < n && slots; ++i) {
-                uint8_t rec[SLOT_SIZE];
-                if (SafeRead(slots + i * SLOT_SIZE, rec, SLOT_SIZE)) Log("  slot %u record: %s", i, Hex(rec, SLOT_SIZE).c_str());
+        if (first) {                                           // all carried weapons once per player object
+            uint8_t **arr = Rd<uint8_t **>(me + 0x1950);
+            uint64_t cnt = Rd<uint64_t>(me + 0x1958); if (cnt > 8) cnt = 8;
+            for (uint64_t i = 0; i < cnt && arr; ++i) {
+                uint8_t *w = Rd<uint8_t *>(arr + i);
+                Log("  carried [%llu] %p %s", (unsigned long long)i, w, w ? Info(w).name.c_str() : "-");
             }
-            uint8_t sb[0x60]; if (SafeRead(me + 0x1940, sb, sizeof sb)) Log("  soldier +1940: %s", Hex(sb, sizeof sb).c_str());
         }
     }
 
     bool dead = Rd<uint8_t>(me + GO_DEAD) != 0;
-    bool riding = (Rd<uint32_t>(me + SB_RIDEFLAGS) & 4) != 0 || Rd<uintptr_t>(me + SB_VEHICLE) != 0;
+    // +5D0 bit 4 was also set during a Fencer dash (0.1 log), so only a vehicle blocks the camera
+    bool riding = Rd<uintptr_t>(me + SB_VEHICLE) != 0;
+    bool bit5d0 = (Rd<uint32_t>(me + SB_RIDEFLAGS) & 4) != 0;
     bool want = g_on && (mortar || !g_onlyMortar) && !dead && !riding;
     if (g_on != prevOn) {
-        Log("toggle %s (mortar equipped: %s%s%s)", g_on ? "ON" : "OFF", mortar ? "yes" : "no", dead ? ", dead" : "", riding ? ", in vehicle" : "");
+        Log("toggle %s (mortar in hand: %s%s%s%s)", g_on ? "ON" : "OFF", mortar ? "yes" : "no", dead ? ", dead" : "",
+            riding ? ", in vehicle" : "", bit5d0 ? ", flag +5D0&4" : "");
         LogShots(me, ws, "toggle");
     }
 
@@ -265,7 +278,7 @@ static void Frame(uint8_t *me) {
     }
     case mc::Act::Idle: break;
     }
-    if (g_on && g_statusMs > 0 && now - g_lastStatus >= (uint64_t)g_statusMs) { g_lastStatus = now; LogShots(me, ws, "periodic"); }
+    if (g_on && mortar && g_statusMs > 0 && now - g_lastStatus >= (uint64_t)g_statusMs) { g_lastStatus = now; LogShots(me, ws, "periodic"); }
 }
 
 // ---- hook ------------------------------------------------------------------------------------------
@@ -309,7 +322,7 @@ static int CharVk(char c) { SHORT vk = VkKeyScanA(c); return vk == -1 ? 0 : (vk 
 extern "C" __declspec(dllexport) bool EDFMLAPI EML6_Load(PluginInfo *info) {
     info->infoVersion = PluginInfo::MaxInfoVer;
     info->name = "MortarCam";
-    info->version = PLUG_VER(0, 1, 0, 0);
+    info->version = PLUG_VER(0, 1, 1, 0);
 
     InitializeCriticalSection(&g_cs);
     char base[MAX_PATH]; HMODULE me = nullptr;
