@@ -1,4 +1,4 @@
-// EDF6 Launcher 0.1 (draft) - small launcher for EDF6 mods.
+// EDF6 Launcher 0.3.2 - small launcher for EDF6 mods.
 //   * mod list from mods.json in the GitHub repository (version, download links, SHA-256)
 //   * install / update / remove, on/off (off = DLL moved to Mods\Plugins\disabled, EDFModLoader does not load subfolders)
 //   * ini editor for every mod (comments become hints, 0/1 become checkboxes, keys are captured by pressing them)
@@ -48,8 +48,13 @@ static void PickLanguage(const std::string &setting) {
     g_en = !(p == LANG_RUSSIAN || p == LANG_UKRAINIAN || p == LANG_BELARUSIAN || p == LANG_KAZAK);
 }
 
-static const char *LAUNCHER_VERSION = "0.3.1";
+static const char *LAUNCHER_VERSION = "0.3.2";
 static const char *DEFAULT_MANIFEST = "https://raw.githubusercontent.com/don-pardon42/edf6-mods/main/mods.json";
+// raw.githubusercontent.com/.../main/... can serve an old mods.json for several minutes after a push (its cache of the
+// branch name; 2026-11-19: MortarCam 0.1.1 was not offered). For the default list the launcher therefore asks the
+// GitHub API first (always the current commit), then raw by full ref, and only then the plain raw link.
+static const char *MANIFEST_API = "https://api.github.com/repos/don-pardon42/edf6-mods/contents/mods.json?ref=main";
+static const char *MANIFEST_REF = "https://raw.githubusercontent.com/don-pardon42/edf6-mods/refs/heads/main/mods.json";
 
 // ---- small helpers ------------------------------------------------------------------------------
 static std::wstring W(const std::string &s) {
@@ -165,7 +170,7 @@ static std::string JsonStr(const std::string &s) {
 }
 
 // ---- HTTPS download (WinHTTP, follows GitHub's redirects) and SHA-256 (CNG) ------------------------------
-static bool HttpGet(const std::string &url, std::string &out, std::string &err) {
+static bool HttpGet(const std::string &url, std::string &out, std::string &err, const wchar_t *headers = nullptr) {
     std::wstring wu = W(url);
     URL_COMPONENTS uc{ sizeof uc }; wchar_t host[256], path[2048];
     uc.lpszHostName = host; uc.dwHostNameLength = 256; uc.lpszUrlPath = path; uc.dwUrlPathLength = 2048;
@@ -177,7 +182,8 @@ static bool HttpGet(const std::string &url, std::string &out, std::string &err) 
     HINTERNET c = WinHttpConnect(s, host, uc.nPort, 0);
     HINTERNET r = c ? WinHttpOpenRequest(c, L"GET", path, nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
                                          uc.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0) : nullptr;
-    bool ok = r && WinHttpSendRequest(r, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) && WinHttpReceiveResponse(r, nullptr);
+    bool ok = r && WinHttpSendRequest(r, headers ? headers : WINHTTP_NO_ADDITIONAL_HEADERS, headers ? (DWORD)-1L : 0,
+                                      WINHTTP_NO_REQUEST_DATA, 0, 0, 0) && WinHttpReceiveResponse(r, nullptr);
     DWORD status = 0, sz = sizeof status;
     if (ok) WinHttpQueryHeaders(r, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, nullptr, &status, &sz, nullptr);
     if (ok && status == 200) {
@@ -323,7 +329,13 @@ static void ScanInstalled() {                           // caller holds g_mx
 }
 static void LoadManifest() {
     std::string text, err; Json j;
-    bool ok = g_manifestSrc.rfind("http", 0) == 0 ? HttpGet(g_manifestSrc, text, err) : (ReadFile(g_manifestSrc, text) || ((err = "file not found"), false));
+    bool ok;
+    if (g_manifestSrc == DEFAULT_MANIFEST) {
+        std::string e1, e2;
+        ok = HttpGet(MANIFEST_API, text, e1, L"Accept: application/vnd.github.raw\r\nCache-Control: no-cache\r\n")
+          || HttpGet(MANIFEST_REF, text, e2, L"Cache-Control: no-cache\r\n")
+          || HttpGet(g_manifestSrc, text, err);
+    } else ok = g_manifestSrc.rfind("http", 0) == 0 ? HttpGet(g_manifestSrc, text, err) : (ReadFile(g_manifestSrc, text) || ((err = "file not found"), false));
     std::vector<Mod> list;
     if (ok && ParseJson(text, j)) {
         if (!j["modloader"]["page"].str().empty()) g_modloaderPage = j["modloader"]["page"].str();
