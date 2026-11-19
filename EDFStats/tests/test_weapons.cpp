@@ -118,7 +118,14 @@ int main(int argc, char **argv) {
         d = 1320; memcpy(sh + 0x6A0, &d, 4); ProbeShields(GetTickCount64() + 100);
         for (int k = 1; k <= 30; ++k) { float px = (float)k; memcpy(sh + 0x90, &px, 4); ProbeShields(GetTickCount64() + 200 + k); }   // a moving position field
         g_missionEnded = false; ShieldSummary();
-        printf("12) summary above lists +06A0 (first 1500 last 1320, down 1) before +0090 (up 29) (expect so)\n"); }
+        printf("12) summary above lists +06A0 (first 1500 last 1320, down 1) before +0090 (up 29) (expect so)\n");
+        // 13) shield durability (+0xBE8): 873 -> 800 (block) -> 900 (refill, not counted) -> 850 (block)
+        static const wchar_t shn[] = L"Tower Shield"; *(const wchar_t **)(sh + 0x1B0) = shn; g_weapons.clear();
+        auto setDur = [&](int32_t v) { memcpy(sh + 0xBE8, &v, 4); TrackShields(GetTickCount64()); };
+        setDur(873); setDur(800); setDur(900); setDur(850);
+        Summary fs = MakeSummary(P(fen), "Fencer");
+        printf("13) shield spent=%.0f blocks=%u name=%s (expect 123 2 Tower Shield)\n", fs.shieldSpent, fs.shieldBlocks, fs.shieldName);
+        printf("    packet %zu bytes (EOS limit 1170)\n", sizeof(Packet)); }
     LeaveCriticalSection(&g_cs);
     return 0;
 }

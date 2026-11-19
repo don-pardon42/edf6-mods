@@ -40,7 +40,7 @@
 #include "MinHook.h"
 #pragma comment(lib, "ws2_32.lib")
 
-static const char *VERSION = "0.16";
+static const char *VERSION = "0.17";
 // ---- language: Russian for ru/uk/be/kk Windows, English otherwise; EDFStats.ini Language=auto|ru|en overrides
 static bool g_en = false;
 static inline const char *L_(const char *ru, const char *en) { return g_en ? en : ru; }
@@ -199,6 +199,8 @@ struct PStats {
     std::map<std::string, double> ffFrom;                   // friendly damage received from other players, by their class
     DpsMeter dps;
     std::map<uint8_t *, WStats> weapons;                    // key: weapon object (nullptr = not recognised); this PC only
+    double shieldSpent = 0; unsigned shieldBlocks = 0;      // Fencer: shield durability used up by blocks, number of blocks
+    std::map<std::string, double> shieldBy;                 // ... per shield name
 };
 static std::map<uint8_t *, PStats> g_ps;            // key: soldier object of a player
 static uint8_t *g_localSol;
@@ -255,6 +257,7 @@ static bool LooksLikeName(const std::string &u) {     // weapon names: no paths,
 }
 struct WInfo { std::string name; };
 static std::unordered_map<uint8_t *, WInfo> g_weapons;      // weapon object -> its name (this mission)
+static std::unordered_map<uint8_t *, int32_t> g_shieldLast;   // shield object -> durability last seen (this mission)
 static void LogWeaponObject(uint8_t *w, uint8_t *owner) {   // WeaponProbe: strings, objects and the owner in a weapon object
     std::set<std::string> seen; int lines = 0; std::string own;
     for (size_t o = 0; o < 0x1800; o += 8) if (owner && Rd<uint8_t *>(w + o) == owner) { char b[16]; snprintf(b, sizeof b, " +%zX", o); own += b; }
@@ -438,11 +441,12 @@ struct Summary {
     uint8_t nEnemy; EnemyRow enemy[8];
     uint8_t nFfFrom; FfRow ffFrom[4];   // friendly fire this player received from other players
     uint8_t nWeapon; WeaponRow weapon[6];
+    float shieldSpent; uint32_t shieldBlocks; char shieldName[32];   // Fencer's shield: durability used, blocks, the shield used most
 };
 struct Packet { uint32_t magic, version, sender, seq, mission; Summary s; };
 #pragma pack(pop)
 static const uint32_t MAGIC = 0x31534445;   // "EDS1"
-static const uint32_t PROTO = 11;   // 10: enemy rows carry class names; 11: per weapon rows, no healing / rescues
+static const uint32_t PROTO = 12;   // 10: enemy rows carry class names; 11: per weapon rows, no healing / rescues; 12: shield
 
 static std::string g_name;                  // UTF-8
 static void CopyStr(char *dst, size_t n, const std::string &s) {
@@ -497,6 +501,8 @@ static Summary MakeSummary(const PStats &p, const std::string &name) {
         r.peak1 = (float)x.second.p1; r.peak5 = (float)x.second.p5; r.active = (float)x.second.active;
         r.hits = x.second.hits; r.kills = x.second.kills; r.veh = x.second.veh;
     }
+    s.shieldSpent = (float)p.shieldSpent; s.shieldBlocks = p.shieldBlocks;
+    { double best = -1; for (auto &b : p.shieldBy) if (b.second > best) { best = b.second; CopyStr(s.shieldName, sizeof s.shieldName, b.first); } }
     return s;
 }
 
@@ -570,6 +576,7 @@ static void OnPacket(const void *data, size_t n, const char *via) {
     if (k.s.nEnemy > 8) k.s.nEnemy = 8;
     if (k.s.nWeapon > 6) k.s.nWeapon = 6;
     for (auto &w : k.s.weapon) w.name[sizeof w.name - 1] = 0;
+    k.s.shieldName[sizeof k.s.shieldName - 1] = 0;
     if (k.s.nFfFrom > 4) k.s.nFfFrom = 4;
     for (auto &e : k.s.ffFrom) e.cls[sizeof e.cls - 1] = 0;
     if (!strncmp(via, "EOS", 3)) ++g_rxEos; else ++g_rxUdp;
@@ -779,7 +786,7 @@ static void RebindLocal(uint8_t *local) {
 static void NewMission(uint8_t *local) {
     if (g_localSol && !g_ps.empty() && !g_missionEnded) WriteResults("new mission");
     g_missionEnded = false; g_finalWriteMs = 0;
-    g_ps.clear(); g_localSol = local; g_hitLines = 0; ++g_missionId; g_weapons.clear(); g_widx.clear(); g_weaponNo = 0; g_wprobeHits = 0;
+    g_ps.clear(); g_localSol = local; g_hitLines = 0; ++g_missionId; g_weapons.clear(); g_widx.clear(); g_weaponNo = 0; g_wprobeHits = 0; g_shieldLast.clear();
     g_missionStartMs = GetTickCount64(); GetLocalTime(&g_missionStart);
     Log("---- new mission (this PC: %s) ----", local ? ClassName(Cls(local).name) : "?");
     NetSend();
@@ -973,6 +980,26 @@ static void ProbeShields(uint64_t now) {     // caller holds g_cs; every 100 ms
     // the durability may live in the Fencer rather than in the shield (2026-11-19: nothing in the shield changed like it)
     if (shield) ProbeObject(g_localSol, 0x2400, "Fencer (HeavyArmor) himself");
 }
+// Shield durability: an integer at Weapon_Shield+0xBE8 (found 2026-11-19: Tower Shield 873 at the start, 11 drops to 568
+// in a mission with about 10 blocks, never rising). Every drop is durability the shield spent on a block.
+static const size_t WS_DURABILITY = 0xBE8;
+static void TrackShields(uint64_t now) {     // caller holds g_cs; every 100 ms
+    if (!g_localSol || g_missionEnded || Cls(g_localSol).name != "HeavyArmor") return;
+    WIdx &x = WeaponsOf(g_localSol, now);
+    for (uint8_t *w : x.list) {
+        if (Cls(w).name != "Weapon_Shield") continue;
+        int32_t d = Rd<int32_t>(w + WS_DURABILITY, -1);
+        if (d < 0 || d > 1000000) continue;                    // not a sane durability: leave it
+        auto it = g_shieldLast.find(w);
+        if (it == g_shieldLast.end()) { g_shieldLast[w] = d; continue; }
+        if (d < it->second) {
+            PStats &p = P(g_localSol);
+            double used = it->second - d;
+            p.shieldSpent += used; ++p.shieldBlocks; p.shieldBy[Weapon(w).name] += used;
+        }
+        it->second = d;                                        // a rise (refill, new shield) is not counted
+    }
+}
 static void ShieldSummary() {                // caller holds g_cs; at the end of a mission
     for (auto &kv : g_shields) {
         ShieldHist &h = kv.second;
@@ -1052,7 +1079,7 @@ static void WriteJson(const std::string &path, const std::vector<Row> &rows, con
         for (int e = 0; e < s.nEnemy; ++e)
             fprintf(f, "%s{\"enemy\": \"%s\", \"class\": \"%s\", \"damage\": %.1f, \"kills\": %u}", e ? ", " : "", Esc(EnemyName(s.enemy[e].name), false).c_str(), Esc(s.enemy[e].name, false).c_str(),
                     s.enemy[e].dmg, s.enemy[e].kills);
-        fprintf(f, "],\n     \"byWeapon\": [");
+        fprintf(f, "],\n     \"shieldSpent\": %.0f, \"shieldBlocks\": %u, \"shieldName\": \"%s\",\n     \"byWeapon\": [", s.shieldSpent, s.shieldBlocks, Esc(s.shieldName, false).c_str());
         for (int w = 0; w < s.nWeapon; ++w) {
             const WeaponRow &x = s.weapon[w];
             fprintf(f, "%s{\"weapon\": \"%s\", \"damage\": %.1f, \"hits\": %u, \"kills\": %u, \"bestHit\": %.1f, \"peakDps1s\": %.1f, "
@@ -1113,6 +1140,7 @@ tr:last-child td{border-bottom:0}.me td:first-child{color:var(--acc2)}.cls{color
         { L_(u8"Предатель — урон по игрокам", u8"Traitor — damage to players"), [](const Summary &s) { return (double)s.ffPlayers; }, "" },
         { L_(u8"Гроза NPC — урон по союзным NPC", u8"NPC menace — damage to allied NPCs"), [](const Summary &s) { return (double)s.ffNpc; }, "" },
         { L_(u8"Сапёр — урон по себе", u8"Sapper — damage to yourself"), [](const Summary &s) { return (double)s.selfDmg; }, "" },
+        { L_(u8"Стена щитов — прочности щита потрачено", u8"Shield wall — shield durability spent"), [](const Summary &s) { return (double)s.shieldSpent; }, "" },
     };
     fputs(L_(u8"<h2>Награды</h2><div class=\"awards\">\n", u8"<h2>Awards</h2><div class=\"awards\">\n"), f);
     for (auto &a : aws) {
@@ -1184,6 +1212,8 @@ tr:last-child td{border-bottom:0}.me td:first-child{color:var(--acc2)}.cls{color
         if (!s.nEnemy) fputs(L_(u8"<tr><td colspan=3 class=\"cls\">нет данных</td></tr>", u8"<tr><td colspan=3 class=\"cls\">no data</td></tr>"), f);
         if (s.dmgVeh > 0) fprintf(f, L_(u8"<tr><td class=\"cls\">из них с техники</td><td>%s</td><td>%u</td></tr>", u8"<tr><td class=\"cls\">of that from vehicles</td><td>%s</td><td>%u</td></tr>"), Num(s.dmgVeh).c_str(), s.killsVeh);
         if (s.ffNpc > 0 || s.ffKills) fprintf(f, L_(u8"<tr><td class=\"cls\">союзные NPC</td><td>%s</td><td>%u</td></tr>", u8"<tr><td class=\"cls\">allied NPCs</td><td>%s</td><td>%u</td></tr>"), Num(s.ffNpc).c_str(), s.ffKills);
+        if (s.shieldBlocks) fprintf(f, L_(u8"<tr><td class=\"cls\">щит «%s»: прочности потрачено / блоков</td><td>%s</td><td>%u</td></tr>", u8"<tr><td class=\"cls\">shield “%s”: durability spent / blocks</td><td>%s</td><td>%u</td></tr>"),
+                                    Esc(s.shieldName, true).c_str(), Num(s.shieldSpent).c_str(), s.shieldBlocks);
         for (int i = 0; i < s.nFfFrom; ++i)
             fprintf(f, L_(u8"<tr><td class=\"cls\">получил от игрока-%s</td><td>%s</td><td></td></tr>", u8"<tr><td class=\"cls\">taken from the %s player</td><td>%s</td><td></td></tr>"), Esc(s.ffFrom[i].cls, true).c_str(), Num(s.ffFrom[i].dmg).c_str());
         fputs("</table></div>\n", f);
@@ -1246,6 +1276,7 @@ static void WriteResults(const char *why) {      // caller holds g_cs
             s.killsVeh, s.parts, s.best, s.peak1, s.peak5, s.ffPlayers, s.ffNpc, s.ffKills, s.selfDmg, s.taken, s.takenVeh,
             s.takenFF, TakenTotal(s), s.deaths, s.dist, s.distVeh);
         for (int i = 0; i < s.nFfFrom; ++i) Log("      friendly fire received from %s: %.0f", s.ffFrom[i].cls, s.ffFrom[i].dmg);
+        if (s.shieldBlocks) Log("      shield %s: durability spent %.0f in %u blocks", s.shieldName, s.shieldSpent, s.shieldBlocks);
         for (int e = 0; e < s.nEnemy; ++e) Log("      %-40s dmg %8.0f  kills %u", EnemyName(s.enemy[e].name).c_str(), s.enemy[e].dmg, s.enemy[e].kills);
         for (int w = 0; w < s.nWeapon; ++w) {
             const WeaponRow &x = s.weapon[w];
@@ -1302,7 +1333,7 @@ static DWORD WINAPI Worker(LPVOID) {
         bool k2 = fg && (GetAsyncKeyState(g_resetKey) & 0x8000) != 0 && (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
         EnterCriticalSection(&g_cs);
         NetReceive();
-        if (now - lastPos >= 100) { SampleDistance(); ProbeShields(now); lastPos = now; }
+        if (now - lastPos >= 100) { SampleDistance(); TrackShields(now); ProbeShields(now); lastPos = now; }
         if (now - lastName >= 5000) { SteamName(); lastName = now; }
         if (now - lastSend >= (uint64_t)g_sendMs) { NetSend(); lastSend = now; }
         if (k1 && !d1) { NetSend(); WriteResults("F9"); fflush(g_log); }
