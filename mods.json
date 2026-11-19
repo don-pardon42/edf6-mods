@@ -93,8 +93,8 @@
     }
   ],
   "launcher": {
-    "version": "0.4.0",
-    "url": "https://github.com/don-pardon42/edf6-mods/releases/download/launcher-v0.4.0/EDF6Launcher.exe",
-    "sha256": "d954b8321f0b1833705f02338d213364a83af4408b8ef48bc6bb0c3c76dafd83"
+    "version": "0.4.1",
+    "url": "https://github.com/don-pardon42/edf6-mods/releases/download/launcher-v0.4.1/EDF6Launcher.exe",
+    "sha256": "e7938613e4eab78b4b433e1db40fc5420e6fd5a226b74a80a2dce8f62df06714"
   }
 }
